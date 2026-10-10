@@ -477,21 +477,30 @@ fn sort_procs(procs: &[ProcTick], key: ProcSort) -> Vec<ProcTick> {
     filtered_sorted(procs, key, None)
 }
 
+/// Width of the `CPU HIST` column; the header and `fill()` assume it.
+const CPU_SPARK_W: usize = 8;
+
 /// 8-cell CPU-usage sparkline for `pid`, right-aligned (newest sample at the
 /// right) and left-padded with spaces while the per-pid history is still
 /// filling. Empty (all spaces) for pids with no recorded history yet — e.g.
 /// while scrubbing a past snapshot whose pids have since exited (issue #10).
 fn cpu_spark(app: &App, pid: u32) -> String {
-    let width = crate::app::PROC_CPU_SPARK_LEN;
     let samples = app
         .history
         .proc_cpu_history
         .get(&pid)
         .map(|r| r.to_vec())
         .unwrap_or_default();
-    let glyphs = crate::ui::widgets::sparkline_string(&samples, app.graph_style);
-    let pad = width.saturating_sub(samples.len());
-    format!("{}{}", " ".repeat(pad), glyphs)
+    spark_cell(&samples, app.graph_style)
+}
+
+/// Render the `CPU HIST` cell: exactly `CPU_SPARK_W` chars, newest sample
+/// last. History is kept `PROC_CPU_SPARK_LEN` deep for the Dense view, so
+/// only the most recent samples fit here.
+fn spark_cell(samples: &[f32], style: crate::ui::graph::GraphStyle) -> String {
+    let tail = &samples[samples.len().saturating_sub(CPU_SPARK_W)..];
+    let glyphs = crate::ui::widgets::sparkline_string(tail, style);
+    format!("{}{}", " ".repeat(CPU_SPARK_W - tail.len()), glyphs)
 }
 
 fn fill(width: usize, used: &str, show_net: bool, show_gpu: bool) -> String {
@@ -582,6 +591,25 @@ mod tests {
         // Bravo < alpha lexically (uppercase B < lowercase a) but our sort
         // lowercases first, so the right order is alpha, Bravo, charlie, delta.
         assert_eq!(names(&s), vec!["alpha", "Bravo", "charlie", "delta"]);
+    }
+
+    #[test]
+    fn spark_cell_is_header_width_for_any_history_depth() {
+        let style = crate::ui::graph::GraphStyle::Bars;
+        for n in [
+            0,
+            1,
+            CPU_SPARK_W,
+            CPU_SPARK_W + 1,
+            crate::app::PROC_CPU_SPARK_LEN,
+        ] {
+            let samples = vec![0.5; n];
+            assert_eq!(
+                spark_cell(&samples, style).chars().count(),
+                CPU_SPARK_W,
+                "{n} samples"
+            );
+        }
     }
 
     #[test]
