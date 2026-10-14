@@ -29,7 +29,7 @@ syswatch --record --keep 24h   # unattended recording, no TUI (see below)
 1 2 3 4 5 6 7 8 9   →  Overview / CPU / Mem / Disks / FS / Procs / GPU / Power / Services
 0 - +               →  Net / Timeline / Insights
 Tab / Shift-Tab     →  Cycle tabs
-↑ / ↓               →  Select row (Procs, Services)
+↑ / ↓               →  Select row (CPU, Procs, Services)
 s                   →  Cycle sort (Procs, Services)
 / or f              →  Filter the table (Procs, Memory, Services)
 ← / →               →  Scrub session backward / forward
@@ -44,6 +44,69 @@ L                   →  Jump straight to the Lite view
 ?                   →  Help
 q / Ctrl-C          →  Quit
 ```
+
+### CPU view
+
+The CPU tab starts with an assessment of CPU activity and available waiting-pressure
+measurements, followed by applications sorted into descending 5% CPU bands
+(10–under 15%, 5–under 10%, 0–under 5%, for example), alphabetically within each band.
+The same ordering applies to checkout, application and process rows when expanded. Chrome
+and its helpers share an application row. `Enter` expands a row and `↑` / `↓`
+selects processes to inspect their command, user and working directory.
+
+Press `b` to group by Git project instead. Attribution follows each process's
+working directory to its repository and reads `origin` locally, without contacting
+the remote. Network origins group by host and repository; checkout rows distinguish
+worktrees. Expand a checkout to see applications with combined CPU totals and process
+counts, using the same grouping as the Application view. Expand an application to
+see its individual processes. Application expansion is independent for each checkout.
+Repositories without a network origin remain separate local projects.
+Processes with unavailable working directories or no discovered repository remain
+under applications. Discovery results are cached for up to 30 seconds.
+
+Matching application names share one row across OS users and installed versions.
+Names come from executable basenames or macOS bundles, falling back to the OS-reported
+process name when the path is unavailable. Details list distinct owners and executable
+paths, including how many processes have unavailable paths. Processes without either
+a name or an executable remain individual. Expanding an application still shows each
+process separately. In Project view, applications combine within each checkout;
+different projects and checkouts retain their own application rows.
+Claude Code's native `claude/versions/<version>` executables and helpers share a
+`claude` application row; their versioned executable paths remain in details.
+
+Known applications use Nerd Font icons; GitHub projects use the fork icon. Configure
+your terminal with a [Nerd Font](https://www.nerdfonts.com/) to display these glyphs.
+Names remain visible alongside icons. Chrome tab titles are not collected; use
+Chrome's Task Manager to identify a particular tab or extension.
+
+Editors, runtimes, containers and databases also have recognizable icons.
+System services use category icons for networking, audio, security, scheduling
+and other roles; sharing an icon does not combine different services into one row.
+The Recent column grows with terminal width to show more history.
+
+A muted `(deleted)` suffix means Linux reports that the running executable was
+unlinked from disk. The process can continue running; the marker does not mean
+it has stopped. Selecting the row shows this explanation in the detail panel.
+
+The Memory column shows resident memory, summed for grouped rows. CPU values use
+the Overview colors: green below 30%, warning at 30%, and critical at 70%.
+CPU percentages in this tab represent the whole machine: one fully occupied core
+on an eight-core machine is 12.5%, displayed rounded to a whole percentage.
+Sorting uses the unrounded values. Process totals refresh approximately every three
+seconds, independently of aggregate CPU samples, so the two need not match in a
+given frame. CPU waiting is Linux PSI `some`, averaged over ten seconds: time when
+at least some tasks waited for CPU, not a percentage of overall slowdown. Missing
+pressure data is shown as unavailable. High CPU usage alone does not establish a fault.
+
+`PgUp` / `PgDn` scrolls selected-row details. `c` expands core activity and redirects
+`PgUp` / `PgDn` to core pages until cores are collapsed. On compact terminals,
+expanded cores temporarily occupy the process-detail space. `←` / `→` scrubs the
+assessment, groups and trends together. Open Settings with `,` and press `S` to
+persist the grouping preference.
+
+Recordings use format v4 to preserve executable paths, working directories and Git
+attribution. This version rejects older recording formats; older binaries cannot
+read v4 recordings.
 
 ### Dense view
 
@@ -202,5 +265,5 @@ src/
     └── widgets.rs       block_bar, sparkline, panel
 ```
 
-Refresh model: a 1 Hz fast loop reads CPU/Mem/Net/IO in-process every tick; the heavier collectors run on their own budgets — processes every ~1.5 s, Power/Services every 5 s, per-process bandwidth on a background thread — so the loop stays cheap regardless of tick rate. The UI redraws on tick or keypress.
+Refresh model: a 1 Hz fast loop reads CPU/Mem/Net/IO in-process every tick; the heavier collectors run on their own budgets — processes every ~3 s, Power/Services every 5 s, per-process bandwidth on a background thread — so the loop stays cheap regardless of tick rate. The UI redraws on tick or keypress.
 

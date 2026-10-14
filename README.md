@@ -55,7 +55,7 @@ Use `←` / `→` to scrub recent history and `End` to return live.
 | Key | Tab | Shows |
 |---|---|---|
 | 1 | Overview | Activity across subsystems |
-| 2 | CPU | CPU usage, load and per-core activity |
+| 2 | CPU | Application/project CPU totals, waiting pressure, process details and core activity |
 | 3 | Memory | Memory use, swap and pressure |
 | 4 | Disks | Disk read/write activity |
 | 5 | Filesystems | Capacity, inode use and mounts |

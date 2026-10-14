@@ -80,6 +80,31 @@ const GROUPS: &[Group] = &[
             },
         ],
     },
+    Group {
+        title: "CPU tab",
+        rows: &[
+            Row {
+                keys: "b",
+                label: "Group by application / Git project (, then S to save)",
+            },
+            Row {
+                keys: "↑ / ↓",
+                label: "Select group, checkout or process; show its details",
+            },
+            Row {
+                keys: "Enter",
+                label: "Expand / collapse selected group or checkout",
+            },
+            Row {
+                keys: "c",
+                label: "Expand / collapse core activity",
+            },
+            Row {
+                keys: "PgUp / PgDn",
+                label: "Page expanded CPU cores",
+            },
+        ],
+    },
     // Lite's footer advertises six keys and has room for no more. These two
     // are real bindings that live here instead — they are conventions from
     // less/vim/top, so they cost a user nothing to not see.

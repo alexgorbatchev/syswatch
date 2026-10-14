@@ -47,6 +47,9 @@ unicode-width = "0.2"
 netwatch-sdk = "0.1"
 toml = "0.8"
 dirs = "5"
+# Local repository discovery/configuration only; no Git network transports.
+git2 = { version = "0.21", default-features = false }
+gix-url = "0.36"
 # Compact binary serialization for session recordings (.swr files).
 # Length-prefixed Snapshot stream — chosen over rkyv for ergonomic
 # Vec/Option/String handling at the cost of zero-copy reads we don't

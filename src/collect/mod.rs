@@ -10,6 +10,7 @@ pub mod power;
 pub mod proc_bandwidth;
 pub mod proc_gpu;
 pub mod proc_memory;
+pub mod projects;
 pub mod ring;
 pub mod sanitize;
 pub mod services;

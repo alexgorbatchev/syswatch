@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 mod app;
 mod collect;
 mod config;
+mod cpu;
 mod insights;
 mod recording;
 mod report;

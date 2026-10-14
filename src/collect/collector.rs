@@ -42,6 +42,7 @@ pub struct Collector {
     /// all. Cloned and re-merged with the per-tick bw/gpu/mem detail on
     /// every sample; only rebuilt when `procs_stale`.
     cached_procs: Vec<ProcTick>,
+    projects: super::projects::ProjectResolver,
     gpu: GpuDiscovery,
     power: PowerCollector,
     proc_bw: ProcessBandwidthCollector,
@@ -102,6 +103,7 @@ impl Collector {
             last_iface: HashMap::new(),
             last_proc_io: HashMap::new(),
             cached_procs: Vec::new(),
+            projects: super::projects::ProjectResolver::default(),
             gpu: GpuDiscovery::new(),
             power: PowerCollector::new(),
             proc_bw: ProcessBandwidthCollector::new(),
@@ -129,7 +131,7 @@ impl Collector {
 
         // sysinfo refresh: cpu/mem/processes/disks/networks. CPU and
         // memory are cheap and tick every iteration; the process list
-        // is heavy and refreshes on its own ~1.5 s budget so the outer
+        // is heavy and refreshes on its own ~3 s budget so the outer
         // loop can run at sub-second tick rates without paying for a
         // full process scan every frame.
         self.sys.refresh_cpu_all();
@@ -144,13 +146,9 @@ impl Collector {
             .map(|t| now.duration_since(t) >= PROCS_REFRESH)
             .unwrap_or(true);
         if procs_stale {
-            // Only the fields `collect_procs` reads, and at the same
-            // update cadence `everything()` used for them: user and cmd
-            // are `OnlyIfNotSet` because a process's UID and command
-            // line don't change after exec, so they're read once and
-            // cached by sysinfo itself. `everything()` also re-reads
-            // environ, exe, cwd and root for every process every 1.5s,
-            // which is real cost for fields we never look at.
+            // Refresh only fields collect_procs reads. Retain the existing
+            // user/command cache; refresh executable and cwd every scan so
+            // exec/chdir can update application and project attribution.
             self.sys.refresh_processes_specifics(
                 sysinfo::ProcessesToUpdate::All,
                 true,
@@ -159,7 +157,9 @@ impl Collector {
                     .with_memory()
                     .with_disk_usage()
                     .with_user(UpdateKind::OnlyIfNotSet)
-                    .with_cmd(UpdateKind::OnlyIfNotSet),
+                    .with_cmd(UpdateKind::OnlyIfNotSet)
+                    .with_exe(UpdateKind::Always)
+                    .with_cwd(UpdateKind::Always),
             );
             self.last_procs_refresh = Some(now);
         }
@@ -489,6 +489,8 @@ impl Collector {
     }
 
     fn collect_procs(&mut self, dt: f64) -> Vec<ProcTick> {
+        let now = Instant::now();
+        self.projects.prune(now);
         let mut next_io: HashMap<u32, (u64, u64)> =
             HashMap::with_capacity(self.sys.processes().len());
         let mut out: Vec<ProcTick> = Vec::with_capacity(self.sys.processes().len());
@@ -527,6 +529,9 @@ impl Collector {
                     .collect::<Vec<_>>()
                     .join(" "),
                 cpu_pct: p.cpu_usage(),
+                exe: p.exe().and_then(|path| path.to_str()).map(str::to_owned),
+                cwd: p.cwd().and_then(|path| path.to_str()).map(str::to_owned),
+                project: p.cwd().and_then(|cwd| self.projects.resolve(cwd, now)),
                 mem_rss: p.memory(),
                 mem_virt: p.virtual_memory(),
                 threads,

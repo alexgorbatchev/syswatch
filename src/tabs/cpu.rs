@@ -1,122 +1,167 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Style, Stylize},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 
 use crate::app::{App, Snapshot};
+use crate::cpu::{self, CpuGroup, CpuRow, GroupKey};
 use crate::ui::{
-    graph::{self, GraphStyle},
     palette as p,
-    widgets::{block_bar_styled, panel},
+    widgets::{human_bytes, panel, sparkline_string},
 };
 
+#[cfg(test)]
+#[path = "cpu_tests.rs"]
+mod tests;
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
-    let v = Layout::default()
+    let groups = cpu::groups(snap, app.user_config.cpu_group);
+    let rows = cpu::rows(snap, &groups, &app.cpu);
+    let selected = cpu::selected_index(&rows, &app.cpu);
+    let roomy = area.height >= 24;
+    let show_detail = roomy || (!app.cpu.show_cores && rows.get(selected).is_some());
+    let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(if roomy { 5 } else { 4 }),
+            Constraint::Length(if roomy { 5 } else { 4 }),
+            Constraint::Min(3),
+            Constraint::Length(if show_detail { 6 } else { 0 }),
+            Constraint::Length(if roomy {
+                if app.cpu.show_cores {
+                    6
+                } else {
+                    3
+                }
+            } else if app.cpu.show_cores {
+                4
+            } else {
+                0
+            }),
+            Constraint::Length(1),
+        ])
         .split(area);
 
-    draw_aggregate(f, v[0], app, snap);
-    draw_per_core(f, v[1], snap, app.graph_style);
+    draw_assessment(f, sections[0], snap, &groups);
+    let samples = displayed_history(app);
+    draw_evidence(f, sections[1], app, snap, &samples);
+    draw_groups(f, sections[2], app, &rows, selected);
+    if show_detail {
+        draw_detail(f, sections[3], rows.get(selected), app.cpu.detail_scroll);
+    }
+    if roomy || app.cpu.show_cores {
+        draw_cores(f, sections[4], app, snap);
+    }
+    f.render_widget(
+        Paragraph::new("b:Group  ↑↓:Select  Enter:Expand  c:Cores  ←→:History")
+            .style(Style::default().fg(p::key_hint()).bg(p::bg())),
+        sections[5],
+    );
 }
 
-fn draw_aggregate(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
-    let block = panel("Aggregate CPU (last ~120s)");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(inner);
-
-    // Chart strip.
-    let series = app.history.cpu.to_vec();
-    let normalized: Vec<f32> = series.iter().map(|v| (v / 100.0).clamp(0.0, 1.0)).collect();
-
-    let spark_area = Rect {
-        x: cols[0].x,
-        y: cols[0].y + 1,
-        width: cols[0].width,
-        height: cols[0].height.saturating_sub(2),
-    };
-    graph::render(
-        f,
-        spark_area,
-        &normalized,
-        app.graph_style,
-        p::brand(),
-        app.graph_opts(),
-    );
-
-    // Counters panel.
-    let mut counters = vec![
-        kv("usage", format!("{:>5.1}%", snap.cpu.usage_pct), p::brand()),
-        kv(
-            "load",
-            format!(
-                "{:.2} / {:.2} / {:.2}",
-                snap.cpu.load_1, snap.cpu.load_5, snap.cpu.load_15
-            ),
-            p::text_primary(),
-        ),
-        kv(
-            "cores",
-            format!("{}", snap.cpu.per_core.len()),
-            p::text_primary(),
-        ),
-        kv("model", snap.host.cpu_model.clone(), p::text_muted()),
-    ];
-    // PSI: % of time ≥1 runnable task waited for a CPU — distinguishes
-    // "busy but keeping up" from actual contention, which load average
-    // alone can't.
-    if let Some(psi) = &snap.pressure {
-        counters.push(kv(
-            "stall",
-            format!("{:.1}% some (psi avg10)", psi.cpu_some),
-            if psi.cpu_some >= 25.0 {
-                p::status_warn()
-            } else {
-                p::text_primary()
-            },
+fn draw_assessment(f: &mut Frame, area: Rect, snap: &Snapshot, groups: &[CpuGroup<'_>]) {
+    let mut lines = vec![Line::styled(
+        cpu::assessment(snap),
+        Style::default().fg(p::text_primary()).bold(),
+    )];
+    if let Some(top) = groups
+        .iter()
+        .max_by(|a, b| {
+            a.cpu_pct
+                .unwrap_or(0.0)
+                .total_cmp(&b.cpu_pct.unwrap_or(0.0))
+        })
+        .filter(|g| g.cpu_pct.unwrap_or(0.0) > 0.0)
+    {
+        lines.push(muted_deleted(format!(
+            "{} {} is the largest observed CPU consumer ({:.0}% of machine).",
+            top.icon,
+            top.label,
+            top.cpu_pct.unwrap_or(0.0)
+        )));
+        lines.push(Line::styled(
+            "Expand to inspect its processes. High usage alone does not establish a fault.",
+            Style::default().fg(p::text_muted()),
+        ));
+    } else {
+        lines.push(Line::raw(
+            "No active CPU consumer identified in this sample.",
         ));
     }
     f.render_widget(
-        Paragraph::new(counters).style(Style::default().bg(p::bg())),
-        cols[1],
+        Paragraph::new(lines)
+            .block(panel("What's slowing things down?"))
+            .style(Style::default().fg(p::text_primary()).bg(p::bg()))
+            .wrap(Wrap { trim: true }),
+        area,
     );
 }
 
-fn draw_per_core(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
-    let block = panel("Per-core utilization");
+/// Every chart ends at the displayed snapshot, including during replay/scrub.
+fn displayed_history(app: &App) -> Vec<&Snapshot> {
+    let count = app.history.session.len().saturating_sub(app.scrub_offset);
+    app.history
+        .session
+        .iter()
+        .take(count)
+        .skip(count.saturating_sub(32))
+        .collect()
+}
+
+fn draw_evidence(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot, samples: &[&Snapshot]) {
+    let elapsed = samples
+        .first()
+        .and_then(|first| snap.t.duration_since(first.t).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let block = panel(format!(
+        "Evidence · last {elapsed}s · CPU across whole machine"
+    ));
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, pct) in snap.cpu.per_core.iter().enumerate() {
-        let color = if *pct >= 85.0 {
-            p::status_error()
-        } else if *pct >= 60.0 {
-            p::status_warn()
-        } else {
-            p::status_good()
-        };
-        let bar = block_bar_styled(*pct / 100.0, inner.width.saturating_sub(14), color, style);
-        let mut spans = vec![Span::styled(
-            format!("c{:>3} ", i),
+    let cpu: Vec<_> = samples.iter().map(|s| s.cpu.usage_pct / 100.0).collect();
+    let width = inner.width.saturating_sub(26) as usize;
+    let chart = |values: &[f32]| {
+        sparkline_string(
+            &values[values.len().saturating_sub(width)..],
+            app.graph_style,
+        )
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("CPU busy     {:>5.0}%    ", snap.cpu.usage_pct),
+            Style::default().fg(p::brand()),
+        ),
+        Span::styled(chart(&cpu), Style::default().fg(p::brand())),
+    ])];
+    if let Some(pressure) = &snap.pressure {
+        // Do not fill unavailable pressure samples with invented zeroes.
+        let mut waiting: Vec<_> = samples
+            .iter()
+            .rev()
+            .map_while(|s| s.pressure.as_ref().map(|p| p.cpu_some / 100.0))
+            .collect();
+        waiting.reverse();
+        lines.push(Line::raw(format!(
+            "CPU waiting  {:>5.0}%    {}",
+            pressure.cpu_some,
+            chart(&waiting)
+        )));
+        lines.push(Line::styled(
+            format!(
+                "Waiting: 10s average · memory {:.1}% · I/O {:.1}%",
+                pressure.mem_some, pressure.io_some
+            ),
             Style::default().fg(p::text_muted()),
-        )];
-        spans.extend(bar.spans);
-        spans.push(Span::styled(
-            format!(" {:>5.1}%", pct),
-            Style::default()
-                .fg(p::text_primary())
-                .add_modifier(Modifier::BOLD),
         ));
-        lines.push(Line::from(spans));
+    } else {
+        lines.push(Line::styled(
+            "CPU waiting: unavailable on this sample/platform",
+            Style::default().fg(p::text_muted()),
+        ));
     }
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(p::bg())),
@@ -124,9 +169,291 @@ fn draw_per_core(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) 
     );
 }
 
-fn kv(k: &str, v: String, val_color: ratatui::style::Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{:<8}", k), Style::default().fg(p::text_muted())),
-        Span::styled(v, Style::default().fg(val_color)),
-    ])
+fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], selected: usize) {
+    let block = panel(format!(
+        "Largest CPU consumers · {}",
+        app.user_config.cpu_group.label()
+    ));
+    let inner = block.inner(area);
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new("No process samples available.").block(block),
+            area,
+        );
+        return;
+    }
+    // Give trends a quarter of the row while retaining room for names on
+    // compact terminals; cap the history window on very wide displays.
+    let trend_width = (inner.width as usize / 4).clamp(8, 48);
+    let table_rows = rows.iter().map(|row| {
+        let expanded = app.cpu.expanded.contains(&row.key);
+        let marker = if row.process.is_some() {
+            " "
+        } else if expanded {
+            "▾"
+        } else {
+            "▸"
+        };
+        let name = format!(
+            "{}{} {} {}",
+            "  ".repeat(row.depth),
+            marker,
+            row.icon,
+            row.label
+        );
+        let trend = if row.depth == 0 && row.cpu_pct.is_some() {
+            let mut values: Vec<_> = (app.scrub_offset..app.scrub_offset + trend_width)
+                .map_while(|offset| app.history.cpu_groups.nth_back(offset))
+                .map(|point| point.get(app.user_config.cpu_group, &row.group) / 100.0)
+                .collect();
+            values.reverse();
+            sparkline_string(&values, app.graph_style)
+        } else {
+            String::new()
+        };
+        Row::new(vec![
+            Cell::from(muted_deleted(name)),
+            Cell::from(row.count.to_string()),
+            Cell::from(
+                row.cpu_pct
+                    .map(|pct| format!("{pct:.0}%"))
+                    .unwrap_or_else(|| "n/a".into()),
+            )
+            .style(
+                Style::default().fg(row
+                    .cpu_pct
+                    .map(|pct| super::overview::kpi_color(pct, 30.0, 70.0))
+                    .unwrap_or_else(p::text_muted)),
+            ),
+            Cell::from(human_bytes(row.mem_rss)),
+            Cell::from(trend),
+        ])
+    });
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(5),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(trend_width as u16),
+        ],
+    )
+    .header(
+        Row::new(["Application / project", "Procs", "CPU", "Memory", "Recent"])
+            .style(Style::default().fg(p::text_muted())),
+    )
+    .block(block)
+    .column_spacing(1)
+    .row_highlight_style(Style::default().bg(p::selection_bg()).bold())
+    .style(Style::default().fg(p::text_primary()).bg(p::bg()));
+    let mut state = TableState::default().with_selected(Some(selected));
+    f.render_stateful_widget(table, area, &mut state);
+}
+
+fn muted_deleted(text: String) -> Line<'static> {
+    if let Some((before, after)) = text.split_once("(deleted)") {
+        Line::from(vec![
+            Span::raw(before.to_owned()),
+            Span::styled("(deleted)", Style::default().fg(p::text_muted())),
+            Span::raw(after.to_owned()),
+        ])
+    } else {
+        Line::raw(text)
+    }
+}
+
+const DELETED_EXPLANATION: &str =
+    "(deleted): executable unlinked from disk; process still running.";
+
+pub(crate) fn detail_line_count(selected: Option<&CpuRow<'_>>) -> usize {
+    detail_lines(selected).len()
+}
+
+fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(row) = selected {
+        if let Some(process) = row.process {
+            lines.push(Line::raw(format!(
+                "PID {} · parent {} · user {}",
+                process.pid, process.ppid, process.user
+            )));
+            lines.push(Line::raw(format!("Command: {}", process.cmd)));
+            lines.push(Line::raw(format!(
+                "Working directory: {}",
+                process
+                    .cwd
+                    .as_deref()
+                    .map(cpu::display_path)
+                    .unwrap_or_else(|| "unavailable".into())
+            )));
+            lines.push(Line::raw(
+                if process
+                    .exe
+                    .as_deref()
+                    .is_some_and(|exe| exe.ends_with(" (deleted)"))
+                {
+                    DELETED_EXPLANATION.into()
+                } else if let Some(project) = &process.project {
+                    format!(
+                        "Attributed by working directory · {}/{} · {}",
+                        project.host,
+                        project.repo,
+                        cpu::display_path(&project.checkout)
+                    )
+                } else {
+                    "No Git project attributed from this process's working directory.".into()
+                },
+            ));
+            lines.push(Line::raw(format!(
+                "Executable: {}",
+                process
+                    .exe
+                    .as_deref()
+                    .filter(|exe| !exe.is_empty())
+                    .map(cpu::display_path)
+                    .unwrap_or_else(|| "unavailable".into())
+            )));
+        } else {
+            lines.push(Line::raw(format!(
+                "{} {} · {} processes",
+                row.icon, row.label, row.count
+            )));
+            match &row.group {
+                GroupKey::Project { host, user, .. } => {
+                    lines.push(Line::raw(format!(
+                        "Git host: {} · user {user}",
+                        if host.is_empty() {
+                            "local (no network origin)"
+                        } else {
+                            host
+                        }
+                    )));
+                    lines.push(Line::raw(
+                        "Working-directory attribution · expand: checkout → application → process.",
+                    ));
+                }
+                GroupKey::Application { .. } => {
+                    let owners: std::collections::BTreeSet<_> = row
+                        .members
+                        .iter()
+                        .map(|p| {
+                            if p.user.is_empty() {
+                                "?"
+                            } else {
+                                p.user.as_str()
+                            }
+                        })
+                        .collect();
+                    lines.push(Line::raw(format!(
+                        "Owners: {}",
+                        owners.into_iter().collect::<Vec<_>>().join(", ")
+                    )));
+                    let paths: std::collections::BTreeSet<_> = row
+                        .members
+                        .iter()
+                        .filter_map(|p| p.exe.as_deref().filter(|exe| !exe.is_empty()))
+                        .collect();
+                    let unavailable = row
+                        .members
+                        .iter()
+                        .filter(|p| p.exe.as_deref().is_none_or(str::is_empty))
+                        .count();
+                    if paths.is_empty() {
+                        lines.push(Line::raw(
+                            "grouped by process name; executable path unavailable",
+                        ));
+                    } else {
+                        lines.push(Line::raw(format!(
+                            "Executable paths ({} unavailable):",
+                            unavailable
+                        )));
+                    }
+                    if row.label.ends_with(" (deleted)") {
+                        lines.push(Line::raw(DELETED_EXPLANATION));
+                    }
+                    lines.extend(
+                        paths
+                            .into_iter()
+                            .map(|path| muted_deleted(cpu::display_path(path))),
+                    );
+                    if row.label == "Google Chrome" {
+                        lines.push(Line::raw("Use Chrome's Task Manager to identify tabs/extensions; tab titles are not collected."));
+                    }
+                }
+            }
+        }
+    }
+    lines
+}
+
+fn draw_detail(f: &mut Frame, area: Rect, selected: Option<&CpuRow<'_>>, scroll: usize) {
+    let lines = detail_lines(selected);
+    let scroll = scroll
+        .min(lines.len().saturating_sub(1))
+        .min(u16::MAX as usize) as u16;
+    f.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll, 0))
+            .block(panel(
+                "Selected · Enter: expand · PgUp/PgDn: details (c: cores)",
+            ))
+            .style(Style::default().fg(p::text_muted()).bg(p::bg())),
+        area,
+    );
+}
+
+fn draw_cores(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+    let block = panel(if app.cpu.show_cores {
+        "Core activity · PgUp/PgDn: pages · c: collapse"
+    } else {
+        "Core activity · c: expand"
+    });
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if app.cpu.show_cores {
+        let cols = (inner.width / 14).max(1) as usize;
+        let lines: Vec<_> = snap
+            .cpu
+            .per_core
+            .chunks(cols)
+            .enumerate()
+            .map(|(chunk, values)| {
+                Line::raw(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| format!("c{:<3} {:>5.0}%  ", chunk * cols + i, v))
+                        .collect::<String>(),
+                )
+            })
+            .collect();
+        let page_height = inner.height.max(1) as usize;
+        let max_page = lines.len().saturating_sub(1) / page_height;
+        let start = app.cpu.core_page.min(max_page) * page_height;
+        f.render_widget(
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .skip(start)
+                    .take(page_height)
+                    .collect::<Vec<_>>(),
+            )
+            .style(Style::default().fg(p::text_muted()).bg(p::bg())),
+            inner,
+        );
+        return;
+    }
+    let busiest = snap.cpu.per_core.iter().copied().fold(0.0f32, f32::max);
+    let busy = snap.cpu.per_core.iter().filter(|v| **v >= 85.0).count();
+    f.render_widget(
+        Paragraph::new(format!(
+            "{} logical cores · busiest {:.0}% · {} at ≥85%",
+            snap.cpu.per_core.len(),
+            busiest,
+            busy
+        ))
+        .style(Style::default().fg(p::text_muted()).bg(p::bg())),
+        inner,
+    );
 }

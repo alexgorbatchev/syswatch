@@ -59,6 +59,7 @@ pub const PROC_CPU_SPARK_LEN: usize = 64;
 pub struct History {
     /// Aggregate CPU usage % (0..100), one sample per tick.
     pub cpu: Ring<f32>,
+    pub cpu_groups: Ring<crate::cpu::GroupTotals>,
     /// Memory used / total ratio (0..1).
     pub mem: Ring<f32>,
     /// Swap used in bytes — used by the swap-thrash heuristic.
@@ -148,6 +149,7 @@ impl History {
         let scap = cap.max(SERIES_CAP);
         Self {
             cpu: Ring::new(scap),
+            cpu_groups: Ring::new(cap),
             mem: Ring::new(scap),
             swap: Ring::new(scap),
             net_rate: Ring::new(scap),
@@ -174,6 +176,7 @@ impl History {
     pub(crate) fn push(&mut self, snap: &Snapshot) {
         // Mirror the snapshot into the session ring so scrubbing has full data.
         self.session.push(snap.clone());
+        self.cpu_groups.push(crate::cpu::GroupTotals::new(snap));
         self.cpu.push(snap.cpu.usage_pct);
         let m = if snap.mem.total_bytes > 0 {
             (snap.mem.used_bytes as f32) / (snap.mem.total_bytes as f32)
@@ -541,6 +544,7 @@ pub struct App {
     pub snap: Option<Snapshot>,
     pub proc_sort: ProcSort,
     pub proc_sel: usize,
+    pub cpu: crate::cpu::CpuState,
     /// Whether the Procs tab shows its drill-in detail pane (which carries the
     /// selected process's started date and other per-proc detail). Toggled
     /// with `d`; off reclaims those rows for the process list (issue #13).
@@ -660,6 +664,7 @@ impl App {
             snap: None,
             proc_sort: ProcSort::Cpu,
             proc_sel: 0,
+            cpu: crate::cpu::CpuState::default(),
             proc_show_detail: true,
             service_sort: ServiceSort::Name,
             service_sel: 0,
@@ -871,7 +876,7 @@ impl App {
         self.service_sel = 0;
     }
 
-    fn handle_key(&mut self, k: KeyEvent) -> bool {
+    pub(crate) fn handle_key(&mut self, k: KeyEvent) -> bool {
         if k.kind != KeyEventKind::Press {
             return false;
         }
@@ -1019,6 +1024,61 @@ impl App {
             (KeyCode::Char('+') | KeyCode::Char('='), _) => self.active = TabId::Insights,
             (KeyCode::Tab, _) => self.active = next_tab(self.active),
             (KeyCode::BackTab, _) => self.active = prev_tab(self.active),
+            (KeyCode::Char('b'), _) if self.active == TabId::Cpu => {
+                self.user_config.cpu_group = self.user_config.cpu_group.next();
+                self.cpu.selected = None;
+                self.cpu.expanded.clear();
+                self.cpu.detail_scroll = 0;
+            }
+            (KeyCode::Char('c'), _) if self.active == TabId::Cpu => {
+                self.cpu.show_cores = !self.cpu.show_cores;
+                self.cpu.core_page = 0;
+            }
+            (KeyCode::PageDown, _) if self.active == TabId::Cpu && self.cpu.show_cores => {
+                self.cpu.core_page = self.cpu.core_page.saturating_add(1);
+            }
+            (KeyCode::PageUp, _) if self.active == TabId::Cpu && self.cpu.show_cores => {
+                self.cpu.core_page = self.cpu.core_page.saturating_sub(1);
+            }
+            (KeyCode::PageUp | KeyCode::PageDown, _) if self.active == TabId::Cpu => {
+                if let Some(snap) = self.displayed_snap() {
+                    let groups = crate::cpu::groups(snap, self.user_config.cpu_group);
+                    let rows = crate::cpu::rows(snap, &groups, &self.cpu);
+                    let selected = crate::cpu::selected_index(&rows, &self.cpu);
+                    let max_scroll =
+                        crate::tabs::cpu_detail_line_count(rows.get(selected)).saturating_sub(1);
+                    self.cpu.detail_scroll = if k.code == KeyCode::PageDown {
+                        self.cpu.detail_scroll.saturating_add(3).min(max_scroll)
+                    } else {
+                        self.cpu.detail_scroll.saturating_sub(3)
+                    };
+                }
+            }
+            (KeyCode::Up | KeyCode::Down | KeyCode::Enter, _) if self.active == TabId::Cpu => {
+                if let Some(snap) = self.displayed_snap() {
+                    let groups = crate::cpu::groups(snap, self.user_config.cpu_group);
+                    let rows = crate::cpu::rows(snap, &groups, &self.cpu);
+                    let selected = crate::cpu::selected_index(&rows, &self.cpu);
+                    let index = match k.code {
+                        KeyCode::Up => selected.saturating_sub(1),
+                        KeyCode::Down => (selected + 1).min(rows.len().saturating_sub(1)),
+                        _ => selected,
+                    };
+                    let key = rows.get(index).map(|r| r.key.clone());
+                    if let Some(key) = key {
+                        if self.cpu.selected.as_ref() != Some(&key) {
+                            self.cpu.detail_scroll = 0;
+                        }
+                        if k.code == KeyCode::Enter
+                            && !matches!(key, crate::cpu::RowKey::Process(..))
+                            && !self.cpu.expanded.remove(&key)
+                        {
+                            self.cpu.expanded.insert(key.clone());
+                        }
+                        self.cpu.selected = Some(key);
+                    }
+                }
+            }
             (KeyCode::Up, _) if self.active == TabId::Procs => {
                 self.proc_sel = self.proc_sel.saturating_sub(1);
             }

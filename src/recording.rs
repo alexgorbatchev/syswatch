@@ -5,7 +5,7 @@
 //! again (or quitting) flushes and closes. The file is then replayable
 //! via `syswatch --replay path/to/session.swr`.
 //!
-//! ## Format (v3)
+//! ## Format (v4)
 //!
 //! A 6-byte header (`b"SWR\0" + u16 version`) followed by a sequence of
 //! zstd-compressed blocks, each `u32 length` (LE) + `length` bytes of
@@ -20,10 +20,8 @@
 //! v2 recording's size on a typical box:
 //!
 //! - **Process identity is recorded once per pid, not once per tick.**
-//!   A process's name, command line, user, parent pid and start time
-//!   don't change after it starts, so v2 spent most of its bytes
-//!   resending three strings (name/cmd/user) for every one of a few
-//!   hundred processes, every tick, for the life of the recording.
+//!   Metadata such as name, command line, user, executable, cwd and
+//!   project often remains unchanged across many ticks.
 //!   [`ProcIdentity`] carries those fields and is only emitted the
 //!   first time a pid is seen, or again if its identity changes — pid
 //!   reuse means "have we seen this pid" isn't the right test, so the
@@ -76,7 +74,8 @@ pub const MAGIC: &[u8; 4] = b"SWR\0";
 /// clear error rather than silently returning zero (or garbage)
 /// snapshots. v3: process-table identity/volatile split + services
 /// dedup + zstd block compression (see module docs).
-pub const FORMAT_VERSION: u16 = 3;
+// v4 retains executable, cwd and project attribution for historical grouping.
+pub const FORMAT_VERSION: u16 = 4;
 
 /// Ticks buffered per compressed block. Small enough that `R` then a
 /// quick `R` to stop doesn't lose much to an unflushed partial block;
@@ -100,10 +99,8 @@ pub fn fresh_path() -> Option<PathBuf> {
 
 // ── On-disk shapes ──────────────────────────────────────────────────────
 
-/// Fields that are genuinely constant for a process's lifetime — it
-/// doesn't rename itself, change its command line, or get re-parented
-/// after exec. Recorded once per pid (or again if the identity itself
-/// changes, which is how pid reuse is detected: see `IdentityTracker`).
+/// Infrequently changing process metadata. Re-emitted whenever any field
+/// changes, including cwd/project changes and pid reuse (`IdentityTracker`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ProcIdentity {
     pid: u32,
@@ -112,6 +109,9 @@ struct ProcIdentity {
     name: String,
     cmd: String,
     start_time: Option<SystemTime>,
+    exe: Option<String>,
+    cwd: Option<String>,
+    project: Option<crate::collect::ProjectIdentity>,
 }
 
 impl ProcIdentity {
@@ -123,6 +123,9 @@ impl ProcIdentity {
             name: p.name.clone(),
             cmd: p.cmd.clone(),
             start_time: p.start_time,
+            exe: p.exe.clone(),
+            cwd: p.cwd.clone(),
+            project: p.project.clone(),
         }
     }
 }
@@ -185,6 +188,9 @@ impl ProcVolatile {
             user: identity.user.clone(),
             name: identity.name.clone(),
             cmd: identity.cmd.clone(),
+            exe: identity.exe.clone(),
+            cwd: identity.cwd.clone(),
+            project: identity.project.clone(),
             cpu_pct: self.cpu_pct,
             mem_rss: self.mem_rss,
             mem_virt: self.mem_virt,
@@ -829,6 +835,39 @@ mod tests {
         // sent once (on the first tick).
         assert_eq!(back[1].procs[0].pid, 100);
         assert_eq!(back[1].procs[1].pid, 200);
+    }
+
+    #[test]
+    fn round_trip_preserves_project_changes_for_the_same_process() {
+        std::fs::create_dir_all(".tmp").unwrap();
+        let dir = tempfile::tempdir_in(".tmp").unwrap();
+        let path = dir.path().join("projects.swr");
+        let mut first = snap_at(1);
+        let mut process = proc(100, "node", 80.0);
+        process.exe = Some("/bin/node".into());
+        process.cwd = Some("/work/web".into());
+        process.project = Some(crate::collect::ProjectIdentity {
+            host: "github.com".into(),
+            repo: "acme/web".into(),
+            checkout: "/work/web".into(),
+        });
+        first.procs.push(process.clone());
+        let mut second = snap_at(2);
+        process.cwd = Some("/work/api".into());
+        process.project.as_mut().unwrap().repo = "acme/api".into();
+        process.project.as_mut().unwrap().checkout = "/work/api".into();
+        second.procs.push(process);
+        {
+            let mut recorder = Recorder::create(path.clone()).unwrap();
+            recorder.push(&first).unwrap();
+            recorder.push(&second).unwrap();
+        }
+        let back = read(&path).unwrap();
+        for (decoded, original) in back.iter().zip([first, second]) {
+            assert_eq!(decoded.procs[0].exe, original.procs[0].exe);
+            assert_eq!(decoded.procs[0].cwd, original.procs[0].cwd);
+            assert_eq!(decoded.procs[0].project, original.procs[0].project);
+        }
     }
 
     #[test]

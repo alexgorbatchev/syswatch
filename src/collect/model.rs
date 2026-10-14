@@ -211,6 +211,13 @@ pub struct ProcTick {
     pub user: String,
     pub name: String,
     pub cmd: String,
+    /// OS-reported executable and working directory, never inferred from cmdline.
+    #[serde(default)]
+    pub exe: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub project: Option<ProjectIdentity>,
     pub cpu_pct: f32,
     pub mem_rss: u64,
     pub mem_virt: u64,
@@ -260,6 +267,15 @@ pub struct ProcTick {
     /// rendered with `~` — since true per-process energy isn't
     /// readable without sudo on any platform. None on non-macOS.
     pub power_w: Option<f32>,
+}
+
+/// Repository identity resolved locally from this process's working directory.
+/// Origin credentials are never retained. Empty host denotes a local repository.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectIdentity {
+    pub host: String,
+    pub repo: String,
+    pub checkout: String,
 }
 
 /// Pressure Stall Information (Linux ≥4.20) — the kernel's direct

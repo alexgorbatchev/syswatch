@@ -17,6 +17,7 @@ pub const MAX_TICK_MS: u64 = 5000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyswatchConfig {
+    pub cpu_group: crate::cpu::GroupMode,
     /// Active theme name (must match a built-in from `crate::ui::theme::THEME_NAMES`).
     pub theme: String,
     /// Active graph style — `"bars"` or `"dots"`.
@@ -48,6 +49,7 @@ fn default_view() -> String {
 impl Default for SyswatchConfig {
     fn default() -> Self {
         Self {
+            cpu_group: crate::cpu::GroupMode::default(),
             theme: "dark".into(),
             graph_style: "bars".into(),
             graph_fade: false,
@@ -126,6 +128,7 @@ mod tests {
     #[test]
     fn validate_clamps_tick_ms() {
         let mut c = SyswatchConfig {
+            cpu_group: crate::cpu::GroupMode::default(),
             tick_ms: 50,
             ..Default::default()
         };
@@ -140,6 +143,7 @@ mod tests {
     #[test]
     fn validate_fills_empty_strings() {
         let mut c = SyswatchConfig {
+            cpu_group: crate::cpu::GroupMode::default(),
             theme: "".into(),
             graph_style: "".into(),
             graph_fade: false,
@@ -156,6 +160,7 @@ mod tests {
     #[test]
     fn validate_preserves_valid_values() {
         let mut c = SyswatchConfig {
+            cpu_group: crate::cpu::GroupMode::default(),
             theme: "dracula".into(),
             graph_style: "dots".into(),
             graph_fade: true,
@@ -175,6 +180,7 @@ mod tests {
     #[test]
     fn round_trip_through_toml() {
         let original = SyswatchConfig {
+            cpu_group: crate::cpu::GroupMode::Project,
             theme: "nord".into(),
             graph_style: "dots".into(),
             graph_fade: true,
@@ -188,6 +194,7 @@ mod tests {
         assert_eq!(parsed.graph_style, original.graph_style);
         assert_eq!(parsed.default_tab, original.default_tab);
         assert_eq!(parsed.tick_ms, original.tick_ms);
+        assert_eq!(parsed.cpu_group, original.cpu_group);
     }
 
     #[test]

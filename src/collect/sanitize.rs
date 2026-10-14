@@ -84,6 +84,13 @@ pub fn scrub_snapshot(snap: &mut Snapshot) {
         scrub(&mut p.user);
         scrub(&mut p.name);
         scrub(&mut p.cmd);
+        scrub_opt(&mut p.exe);
+        scrub_opt(&mut p.cwd);
+        if let Some(project) = &mut p.project {
+            scrub(&mut project.host);
+            scrub(&mut project.repo);
+            scrub(&mut project.checkout);
+        }
     }
 
     for g in &mut snap.gpus {
@@ -185,6 +192,13 @@ mod tests {
                 user: evil.into(),
                 name: evil.into(),
                 cmd: evil.into(),
+                exe: Some(evil.into()),
+                cwd: Some(evil.into()),
+                project: Some(crate::collect::ProjectIdentity {
+                    host: evil.into(),
+                    repo: evil.into(),
+                    checkout: evil.into(),
+                }),
                 ..Default::default()
             }],
             gpus: vec![GpuTick {

@@ -371,7 +371,7 @@ fn draw_insights_strip(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn kpi_color(v: f32, warn: f32, crit: f32) -> ratatui::style::Color {
+pub(super) fn kpi_color(v: f32, warn: f32, crit: f32) -> ratatui::style::Color {
     if v >= crit {
         p::status_error()
     } else if v >= warn {
