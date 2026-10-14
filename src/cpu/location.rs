@@ -41,11 +41,7 @@ impl Location<'_> {
                     },
                 },
                 (*repo).into(),
-                if *host == "github.com" {
-                    '\u{f402}'
-                } else {
-                    '\u{e702}'
-                },
+                '\u{e725}',
             ),
             Self::Directory(path) => (
                 GroupKey::Directory {

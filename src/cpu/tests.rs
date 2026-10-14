@@ -363,6 +363,19 @@ fn project_groups_merge_worktrees_but_separate_hosts_and_keep_unattributed_apps(
 }
 
 #[test]
+fn repositories_share_an_icon_across_hosts_and_local_checkouts() {
+    for host in ["github.com", "gitlab.com", "git.example.com", ""] {
+        let mut p = process(1, "/bin/node", 8.0);
+        p.project = Some(project(host, "/work/web"));
+        let snap = snapshot(vec![p]);
+        let grouped = groups(&snap, GroupMode::Project);
+        assert_eq!(grouped[0].icon, '\u{e725}', "host: {host}");
+        let visible = rows(&snap, GroupMode::Project, &grouped, &CpuState::default());
+        assert_eq!(visible[0].icon, '\u{e725}', "host: {host}");
+    }
+}
+
+#[test]
 fn same_application_names_combine_installations_and_owners() {
     let mut a = process(1, "/one/worker", 8.0);
     a.mem_rss = 1024;
