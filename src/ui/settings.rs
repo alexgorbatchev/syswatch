@@ -6,8 +6,8 @@
 //! lives in one place and stays unit-testable.
 
 use ratatui::{
-    layout::{Alignment, Rect},
-    style::{Style, Stylize},
+    layout::{HorizontalAlignment, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
@@ -196,7 +196,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Paragraph::new(Line::from(footer_spans))
-            .alignment(Alignment::Center)
+            .alignment(HorizontalAlignment::Center)
             .style(Style::default().bg(p::bg())),
         footer_area,
     );

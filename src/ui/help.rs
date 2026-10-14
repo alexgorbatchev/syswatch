@@ -3,8 +3,8 @@
 //! footer hint strip and this dialog stay aligned.
 
 use ratatui::{
-    layout::{Alignment, Rect},
-    style::{Style, Stylize},
+    layout::{HorizontalAlignment, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
@@ -314,7 +314,7 @@ pub fn render(f: &mut Frame, area: Rect) {
     ]);
     f.render_widget(
         Paragraph::new(footer)
-            .alignment(Alignment::Center)
+            .alignment(HorizontalAlignment::Center)
             .style(Style::default().bg(p::bg())),
         footer_area,
     );
