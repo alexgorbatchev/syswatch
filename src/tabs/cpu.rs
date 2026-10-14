@@ -277,7 +277,13 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
     .column_spacing(1)
     .row_highlight_style(Style::default().bg(p::selection_bg()).bold())
     .style(Style::default().fg(p::text_primary()).bg(p::bg()));
-    let mut state = TableState::default().with_selected(Some(selected));
+    // Rows are one line each, below the one-line header. Given a window that
+    // already shows the selection, the table draws it unmoved.
+    let visible = inner.height.saturating_sub(1) as usize;
+    let offset = app.cpu_scroll.follow(selected, rows.len(), visible);
+    let mut state = TableState::default()
+        .with_offset(offset)
+        .with_selected(Some(selected));
     f.render_stateful_widget(table, area, &mut state);
 }
 

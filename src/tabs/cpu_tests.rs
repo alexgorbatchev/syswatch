@@ -538,6 +538,61 @@ fn project_expansion_reveals_checkout_then_application_then_process() {
     assert!(screen.contains("working directory"), "{screen}");
 }
 
+/// Moving up from the bottom of a long consumer list moves the cursor, not
+/// the list — the same windowing contract as the Procs and Services tables.
+#[test]
+fn cursor_moves_up_without_scrolling_the_list() {
+    let mut app = app();
+    let mut snap = app.snap.take().unwrap();
+    snap.procs = (0..40)
+        .map(|i| ProcTick {
+            pid: 1000 + i,
+            name: format!("tool{i:02}"),
+            exe: Some(format!("/opt/tool{i:02}")),
+            cpu_pct: 80.0 - i as f32,
+            ..Default::default()
+        })
+        .collect();
+    app.history.push(&snap);
+    app.snap = Some(snap);
+    // The table row — the only line naming both the tool and its PID, unlike
+    // the assessment and detail text.
+    let row_of = |screen: &str, i: u32| {
+        let (name, pid) = (format!("tool{i:02}"), (1000 + i).to_string());
+        screen
+            .lines()
+            .position(|l| l.contains(&name) && l.contains(&pid))
+    };
+    // Draw after every press, like the event loop: only rendering knows how
+    // many rows fit, so that is where the window moves.
+    let press = |app: &mut App, key: KeyCode, n: usize| {
+        for _ in 0..n {
+            app.handle_key(KeyEvent::from(key));
+            render(app, 120, 35);
+        }
+    };
+
+    press(&mut app, KeyCode::Down, 39);
+    let bottom = render(&app, 120, 35);
+    let last = row_of(&bottom, 39).expect("last consumer on screen");
+
+    press(&mut app, KeyCode::Up, 3);
+    let after = render(&app, 120, 35);
+    assert_eq!(
+        row_of(&after, 39),
+        Some(last),
+        "the list scrolled under the cursor:\n{after}"
+    );
+    assert_eq!(row_of(&after, 36), Some(last - 3), "{after}");
+
+    // Back up past the top of the window, the list does scroll — and the
+    // selection becomes its first row.
+    press(&mut app, KeyCode::Up, 36);
+    let top = render(&app, 120, 35);
+    let first = row_of(&top, 0).expect("first consumer on screen");
+    assert_eq!(row_of(&top, 1), Some(first + 1), "{top}");
+}
+
 #[test]
 fn scrubbing_uses_historical_groups_and_assessment() {
     let mut app = app();

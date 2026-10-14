@@ -546,6 +546,9 @@ pub struct App {
     pub proc_sort: ProcSort,
     pub proc_sel: usize,
     pub cpu: crate::cpu::CpuState,
+    /// The CPU consumers table's scroll window, moved by the renderer to
+    /// follow `cpu.selected`.
+    pub cpu_scroll: ScrollWindow,
     /// The Procs table's scroll window, moved by the renderer to follow
     /// `proc_sel`.
     pub proc_scroll: ScrollWindow,
@@ -672,6 +675,7 @@ impl App {
             proc_sort: ProcSort::Cpu,
             proc_sel: 0,
             cpu: crate::cpu::CpuState::default(),
+            cpu_scroll: ScrollWindow::default(),
             proc_scroll: ScrollWindow::default(),
             proc_show_detail: true,
             service_sort: ServiceSort::Name,
