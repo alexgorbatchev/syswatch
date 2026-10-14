@@ -204,11 +204,24 @@ pub struct GpuTick {
     pub last_submitter_pid: Option<u32>,
 }
 
+/// Display category based on recognized OS/session helper identities.
+/// Tools include databases, containers and VMs, regardless of owner or unit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessScope {
+    System,
+    Tool,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProcTick {
     pub pid: u32,
     pub ppid: u32,
     pub user: String,
+    #[serde(default)]
+    pub scope: ProcessScope,
     pub name: String,
     pub cmd: String,
     /// OS-reported executable and working directory, never inferred from cmdline.

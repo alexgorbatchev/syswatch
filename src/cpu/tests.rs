@@ -1,5 +1,5 @@
 use super::*;
-use crate::collect::{CpuTick, ProcTick, ProjectIdentity, Snapshot};
+use crate::collect::{CpuTick, ProcTick, ProcessScope, ProjectIdentity, Snapshot};
 
 fn process(pid: u32, exe: &str, cpu: f32) -> ProcTick {
     ProcTick {
@@ -20,6 +20,184 @@ fn snapshot(procs: Vec<ProcTick>) -> Snapshot {
         procs,
         ..Default::default()
     }
+}
+
+#[test]
+fn helpers_combine_across_owners_below_development_services() {
+    use std::{ffi::OsStr, path::Path};
+    let mut procs = vec![
+        process(1, "/usr/lib/systemd/systemd", 240.0),
+        process(2, "/usr/lib/systemd/systemd", 240.0),
+        process(3, "/usr/sbin/sshd", 8.0),
+        process(4, "/usr/sbin/sshd", 8.0),
+        process(5, "/usr/bin/ssh-agent", 8.0),
+        process(6, "/usr/bin/gpg-agent", 8.0),
+        process(7, "/usr/lib/postgresql/16/bin/postgres", 8.0),
+        process(8, "/usr/bin/redis-server", 8.0),
+        process(9, "/usr/bin/dockerd", 8.0),
+        process(10, "/usr/bin/qemu-system-x86_64", 8.0),
+    ];
+    for p in &mut procs {
+        p.user = if p.pid % 2 == 0 { "alex" } else { "root" }.into();
+        p.scope = crate::collect::process_scope::classify(
+            p.exe.as_deref().map(Path::new),
+            OsStr::new(&p.name),
+        );
+    }
+    let snap = snapshot(procs);
+    for mode in [GroupMode::Application, GroupMode::Project] {
+        let grouped = groups(&snap, mode);
+        assert_eq!(
+            grouped.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
+            [
+                "dockerd",
+                "postgres",
+                "qemu-system-x86_64",
+                "redis-server",
+                "systemd",
+                "gpg-agent",
+                "ssh-agent",
+                "sshd"
+            ]
+        );
+        for name in ["systemd", "sshd"] {
+            let group = grouped.iter().find(|g| g.label == name).unwrap();
+            assert_eq!(group.members.len(), 2);
+            assert!(system_only(&group.members));
+        }
+    }
+}
+
+#[test]
+fn system_only_groups_follow_other_groups_before_cpu_banding() {
+    let mut procs = vec![
+        process(1, "/bin/user-zulu", 8.0),
+        process(2, "/bin/user-alpha", 32.0),
+        process(3, "/bin/user-busy", 80.0),
+        process(4, "/bin/system-zulu", 240.0),
+        process(5, "/bin/system-alpha", 272.0),
+        process(6, "/bin/system-busy", 400.0),
+        process(7, "/bin/node", 0.0),
+        process(8, "/bin/node", 0.0),
+        process(9, "/bin/unknown", 0.0),
+        process(10, "/bin/dbus-daemon", 0.0),
+        process(11, "/bin/dbus-daemon", 0.0),
+    ];
+    for p in &mut procs {
+        p.scope = match p.pid {
+            4..=7 | 10 => ProcessScope::System,
+            9 | 11 => ProcessScope::Unknown,
+            _ => ProcessScope::Tool,
+        };
+        // Account names cannot determine system/user classification.
+        p.user = if p.scope == ProcessScope::System {
+            "daemon"
+        } else {
+            "root"
+        }
+        .into();
+    }
+    let snap = snapshot(procs);
+    for mode in [GroupMode::Application, GroupMode::Project] {
+        let grouped = groups(&snap, mode);
+        assert_eq!(
+            grouped.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
+            [
+                "user-busy",
+                "dbus-daemon",
+                "node",
+                "unknown",
+                "user-alpha",
+                "user-zulu",
+                "system-busy",
+                "system-alpha",
+                "system-zulu"
+            ]
+        );
+        let node = grouped.iter().find(|g| g.label == "node").unwrap();
+        let dbus = grouped.iter().find(|g| g.label == "dbus-daemon").unwrap();
+        assert_eq!(dbus.members.len(), 2);
+        assert!(!system_only(&dbus.members));
+        assert_eq!(node.members.len(), 2);
+        assert_eq!(
+            node.members.iter().map(|p| p.pid).collect::<Vec<_>>(),
+            [8, 7]
+        );
+        let mut state = CpuState::default();
+        state.expanded.insert(RowKey::Group(node.key.clone()));
+        let leaves: Vec<_> = rows(&snap, &grouped, &state)
+            .iter()
+            .filter_map(|row| row.process.map(|p| p.pid))
+            .collect();
+        assert_eq!(leaves, [8, 7]);
+    }
+}
+
+#[test]
+fn system_priority_applies_to_projects_checkouts_and_nested_applications() {
+    let mut procs = vec![
+        process(1, "/bin/zulu", 8.0),
+        process(2, "/bin/alpha", 8.0),
+        process(3, "/bin/busy", 400.0),
+        process(4, "/bin/service", 480.0),
+        process(5, "/bin/project-service", 560.0),
+    ];
+    for p in &mut procs {
+        p.scope = if p.pid >= 3 {
+            ProcessScope::System
+        } else {
+            ProcessScope::Tool
+        };
+        p.project = Some(project(
+            "github.com",
+            match p.pid {
+                1..=3 => "/work/user",
+                4 => "/work/system",
+                _ => "/work/separate",
+            },
+        ));
+        if p.pid == 5 {
+            p.project.as_mut().unwrap().repo = "acme/system".into();
+        }
+    }
+    let snap = snapshot(procs);
+    let grouped = groups(&snap, GroupMode::Project);
+    assert_eq!(grouped[0].members.len(), 4);
+    assert_eq!(grouped[1].label, "acme/system");
+    let mut state = CpuState::default();
+    state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
+    for row in rows(&snap, &grouped, &state) {
+        if row.depth == 1 {
+            state.expanded.insert(row.key);
+        }
+    }
+    let expanded = rows(&snap, &grouped, &state);
+    assert_eq!(
+        expanded
+            .iter()
+            .filter(|r| r.depth == 1)
+            .map(|r| r.label.as_str())
+            .collect::<Vec<_>>(),
+        ["/work/user", "/work/system"]
+    );
+    assert_eq!(
+        expanded
+            .iter()
+            .filter(|r| r.depth == 2)
+            .map(|r| r.label.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "zulu", "busy", "service"]
+    );
+    state.selected = Some(expanded[1].key.clone());
+    let mut changed = snap.clone();
+    changed.procs[0].scope = ProcessScope::System;
+    changed.procs[1].scope = ProcessScope::System;
+    let changed_groups = groups(&changed, GroupMode::Project);
+    let changed_rows = rows(&changed, &changed_groups, &state);
+    assert_eq!(
+        changed_rows[selected_index(&changed_rows, &state)].key,
+        expanded[1].key
+    );
 }
 
 #[test]

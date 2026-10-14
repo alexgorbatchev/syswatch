@@ -5,7 +5,7 @@
 //! again (or quitting) flushes and closes. The file is then replayable
 //! via `syswatch --replay path/to/session.swr`.
 //!
-//! ## Format (v4)
+//! ## Format (v5)
 //!
 //! A 6-byte header (`b"SWR\0" + u16 version`) followed by a sequence of
 //! zstd-compressed blocks, each `u32 length` (LE) + `length` bytes of
@@ -20,8 +20,8 @@
 //! v2 recording's size on a typical box:
 //!
 //! - **Process identity is recorded once per pid, not once per tick.**
-//!   Metadata such as name, command line, user, executable, cwd and
-//!   project often remains unchanged across many ticks.
+//!   Metadata such as name, command line, user, executable, cwd,
+//!   project and system/tool category often remains unchanged across many ticks.
 //!   [`ProcIdentity`] carries those fields and is only emitted the
 //!   first time a pid is seen, or again if its identity changes — pid
 //!   reuse means "have we seen this pid" isn't the right test, so the
@@ -44,9 +44,9 @@
 //! erroring) at the first bad record or block, so a recording cut off
 //! by a crash mid-tick still replays everything before that point.
 //!
-//! v1 and v2 files are rejected with a clear error, same as v2
-//! rejected v1 — postcard isn't self-describing and the encoding
-//! changed shape, so there's no way to read the old bytes as the new
+//! Older files are rejected with a clear error — postcard isn't
+//! self-describing and the encoding changed shape, so there's no way
+//! to read the old bytes as the new
 //! format.
 
 use std::collections::{HashMap, VecDeque};
@@ -75,7 +75,8 @@ pub const MAGIC: &[u8; 4] = b"SWR\0";
 /// snapshots. v3: process-table identity/volatile split + services
 /// dedup + zstd block compression (see module docs).
 // v4 retains executable, cwd and project attribution for historical grouping.
-pub const FORMAT_VERSION: u16 = 4;
+// v5 retains system/tool category, including changes for an existing PID.
+pub const FORMAT_VERSION: u16 = 5;
 
 /// Ticks buffered per compressed block. Small enough that `R` then a
 /// quick `R` to stop doesn't lose much to an unflushed partial block;
@@ -106,6 +107,7 @@ struct ProcIdentity {
     pid: u32,
     ppid: u32,
     user: String,
+    scope: crate::collect::ProcessScope,
     name: String,
     cmd: String,
     start_time: Option<SystemTime>,
@@ -120,6 +122,7 @@ impl ProcIdentity {
             pid: p.pid,
             ppid: p.ppid,
             user: p.user.clone(),
+            scope: p.scope,
             name: p.name.clone(),
             cmd: p.cmd.clone(),
             start_time: p.start_time,
@@ -186,6 +189,7 @@ impl ProcVolatile {
             pid: self.pid,
             ppid: identity.ppid,
             user: identity.user.clone(),
+            scope: identity.scope,
             name: identity.name.clone(),
             cmd: identity.cmd.clone(),
             exe: identity.exe.clone(),
@@ -871,6 +875,43 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_preserves_scope_changes_and_historical_cpu_order() {
+        use crate::collect::ProcessScope;
+        std::fs::create_dir_all(".tmp").unwrap();
+        let dir = tempfile::tempdir_in(".tmp").unwrap();
+        let path = dir.path().join("scopes.swr");
+        let mut snapshots = Vec::new();
+        for (i, scope) in [
+            ProcessScope::System,
+            ProcessScope::Tool,
+            ProcessScope::Unknown,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut snap = snap_at(i as u64);
+            snap.cpu.per_core = vec![0.0];
+            snap.procs = vec![proc(100, "sshd", 70.0), proc(200, "node", 10.0)];
+            snap.procs[0].scope = scope;
+            snap.procs[1].scope = ProcessScope::Tool;
+            snapshots.push(snap);
+        }
+        {
+            let mut recorder = Recorder::create(path.clone()).unwrap();
+            for snap in &snapshots {
+                recorder.push(snap).unwrap();
+            }
+        }
+        let decoded = read(&path).unwrap();
+        assert_eq!(decoded.len(), snapshots.len());
+        for (i, (back, original)) in decoded.iter().zip(&snapshots).enumerate() {
+            assert_eq!(back.procs[0].scope, original.procs[0].scope);
+            let groups = crate::cpu::groups(back, crate::cpu::GroupMode::Application);
+            assert_eq!(groups[0].label, if i == 0 { "node" } else { "sshd" });
+        }
+    }
+
+    #[test]
     fn pid_reuse_gets_a_fresh_identity_not_the_stale_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reuse.swr");
@@ -991,13 +1032,13 @@ mod tests {
 
     #[test]
     fn rejects_older_format_version() {
-        // v2 (and v1) recordings predate this format's shape and can't
+        // The immediately preceding format predates this shape and can't
         // be decoded by this binary — better a clear error than an
         // empty or garbled replay.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.swr");
         let mut bytes = Vec::from(*MAGIC);
-        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&(FORMAT_VERSION - 1).to_le_bytes());
         fs::write(&path, &bytes).unwrap();
         let err = read(&path).unwrap_err();
         assert!(err.to_string().contains("predates this binary"));

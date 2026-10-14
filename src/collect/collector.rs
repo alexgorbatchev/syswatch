@@ -521,6 +521,7 @@ impl Collector {
                 pid: pid_u,
                 ppid: p.parent().map(Pid::as_u32).unwrap_or(0),
                 user,
+                scope: super::process_scope::classify(p.exe(), p.name()),
                 name: p.name().to_string_lossy().into_owned(),
                 cmd: p
                     .cmd()

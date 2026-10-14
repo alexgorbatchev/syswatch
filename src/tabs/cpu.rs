@@ -171,7 +171,7 @@ fn draw_evidence(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot, samples:
 
 fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], selected: usize) {
     let block = panel(format!(
-        "Largest CPU consumers · {}",
+        "Largest CPU consumers · {} · system last",
         app.user_config.cpu_group.label()
     ));
     let inner = block.inner(area);
@@ -185,6 +185,12 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
     // Give trends a quarter of the row while retaining room for names on
     // compact terminals; cap the history window on very wide displays.
     let trend_width = (inner.width as usize / 4).clamp(8, 48);
+    let pid_width = rows
+        .iter()
+        .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
+        .max()
+        .unwrap_or(0)
+        .max(3);
     let table_rows = rows.iter().map(|row| {
         let expanded = app.cpu.expanded.contains(&row.key);
         let marker = if row.process.is_some() {
@@ -201,6 +207,13 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
             row.icon,
             row.label
         );
+        let mut name = muted_deleted(name);
+        if cpu::system_only(&row.members) {
+            name.spans.push(Span::styled(
+                " [system]",
+                Style::default().fg(p::text_muted()),
+            ));
+        }
         let trend = if row.depth == 0 && row.cpu_pct.is_some() {
             let mut values: Vec<_> = (app.scrub_offset..app.scrub_offset + trend_width)
                 .map_while(|offset| app.history.cpu_groups.nth_back(offset))
@@ -212,7 +225,8 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
             String::new()
         };
         Row::new(vec![
-            Cell::from(muted_deleted(name)),
+            Cell::from(name),
+            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
             Cell::from(row.count.to_string()),
             Cell::from(
                 row.cpu_pct
@@ -233,15 +247,23 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
         table_rows,
         [
             Constraint::Min(12),
+            Constraint::Length(pid_width as u16),
             Constraint::Length(5),
-            Constraint::Length(8),
+            Constraint::Length(5),
             Constraint::Length(10),
             Constraint::Length(trend_width as u16),
         ],
     )
     .header(
-        Row::new(["Application / project", "Procs", "CPU", "Memory", "Recent"])
-            .style(Style::default().fg(p::text_muted())),
+        Row::new([
+            "Application / project",
+            "PID",
+            "Procs",
+            "CPU",
+            "Memory",
+            "Recent",
+        ])
+        .style(Style::default().fg(p::text_muted())),
     )
     .block(block)
     .column_spacing(1)
@@ -273,9 +295,23 @@ pub(crate) fn detail_line_count(selected: Option<&CpuRow<'_>>) -> usize {
 fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(row) = selected {
+        let system = row
+            .members
+            .iter()
+            .filter(|p| p.scope == crate::collect::ProcessScope::System)
+            .count();
+        let tools = row
+            .members
+            .iter()
+            .filter(|p| p.scope == crate::collect::ProcessScope::Tool)
+            .count();
+        let scope = format!(
+            "Class: {system} system · {tools} tools · {} unknown",
+            row.members.len() - system - tools
+        );
         if let Some(process) = row.process {
             lines.push(Line::raw(format!(
-                "PID {} · parent {} · user {}",
+                "PID {} · parent {} · user {} · {scope}",
                 process.pid, process.ppid, process.user
             )));
             lines.push(Line::raw(format!("Command: {}", process.cmd)));
@@ -316,7 +352,7 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
             )));
         } else {
             lines.push(Line::raw(format!(
-                "{} {} · {} processes",
+                "{} {} · {} processes · {scope}",
                 row.icon, row.label, row.count
             )));
             match &row.group {

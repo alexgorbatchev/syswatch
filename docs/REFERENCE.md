@@ -48,11 +48,24 @@ q / Ctrl-C          →  Quit
 ### CPU view
 
 The CPU tab starts with an assessment of CPU activity and available waiting-pressure
-measurements, followed by applications sorted into descending 5% CPU bands
+measurements, followed by applications with system-only groups at the bottom.
+Within each section, applications sort into descending 5% CPU bands
 (10–under 15%, 5–under 10%, 0–under 5%, for example), alphabetically within each band.
 The same ordering applies to checkout, application and process rows when expanded. Chrome
 and its helpers share an application row. `Enter` expands a row and `↑` / `↓`
 selects processes to inspect their command, user and working directory.
+
+`[system]` marks groups containing only recognized OS/session helpers, including
+systemd (both system and user managers), sshd, ssh-agent, gpg-agent and dbus.
+Classification uses executable basenames, falling back to OS process names when
+paths are unavailable; Linux's truncated process names are recognized too.
+Root ownership, running as a system service, installation paths and CPU usage do
+not determine the category. PostgreSQL, Redis, Docker, VMs, runtimes, shells and
+other tools stay in the first section. Unrecognized programs and processes with
+missing identities stay there too. Details show system, tool and unknown counts.
+Mixed groups remain combined in the first section. Expanded process rows have
+a separate PID column. Application grouping uses executable identities rather
+than process ancestry; a tool running under Node can therefore appear under node.
 
 Press `b` to group by Git project instead. Attribution follows each process's
 working directory to its repository and reads `origin` locally, without contacting
@@ -104,9 +117,9 @@ expanded cores temporarily occupy the process-detail space. `←` / `→` scrubs
 assessment, groups and trends together. Open Settings with `,` and press `S` to
 persist the grouping preference.
 
-Recordings use format v4 to preserve executable paths, working directories and Git
-attribution. This version rejects older recording formats; older binaries cannot
-read v4 recordings.
+Recordings use format v5 to preserve executable paths, working directories, Git
+attribution and system/tool categories. This version rejects older recording formats;
+older binaries cannot read v5 recordings.
 
 ### Dense view
 

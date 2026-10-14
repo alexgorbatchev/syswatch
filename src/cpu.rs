@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::SystemTime;
 
-use crate::collect::{ProcTick, Snapshot};
+use crate::collect::{ProcTick, ProcessScope, Snapshot};
 
 mod icons;
 
@@ -47,6 +47,11 @@ pub struct CpuGroup<'a> {
     pub icon: char,
     pub cpu_pct: Option<f32>,
     pub members: Vec<&'a ProcTick>,
+}
+
+/// Unknown or mixed membership must never move a group into the system section.
+pub fn system_only(procs: &[&ProcTick]) -> bool {
+    !procs.is_empty() && procs.iter().all(|p| p.scope == ProcessScope::System)
 }
 
 /// Compute each history point once on ingestion, not once per row/frame.
@@ -190,17 +195,24 @@ fn group_processes<'a>(
             group.label.truncate(group.label.len() - " (deleted)".len());
         }
         group.members.sort_by(|a, b| {
-            usage_order(
-                machine_pct(snap, a.cpu_pct),
-                &a.name,
-                machine_pct(snap, b.cpu_pct),
-                &b.name,
-            )
-            .then(a.pid.cmp(&b.pid))
+            (a.scope == ProcessScope::System)
+                .cmp(&(b.scope == ProcessScope::System))
+                .then_with(|| {
+                    usage_order(
+                        machine_pct(snap, a.cpu_pct),
+                        &a.name,
+                        machine_pct(snap, b.cpu_pct),
+                        &b.name,
+                    )
+                })
+                .then(a.pid.cmp(&b.pid))
         });
     }
     groups.sort_by(|a, b| {
-        usage_order(a.cpu_pct, &a.label, b.cpu_pct, &b.label).then(a.key.cmp(&b.key))
+        system_only(&a.members)
+            .cmp(&system_only(&b.members))
+            .then_with(|| usage_order(a.cpu_pct, &a.label, b.cpu_pct, &b.label))
+            .then(a.key.cmp(&b.key))
     });
     groups
 }
@@ -298,7 +310,11 @@ pub fn rows<'a>(snap: &'a Snapshot, groups: &[CpuGroup<'a>], state: &CpuState) -
                     (path, procs, cpu)
                 })
                 .collect();
-            checkouts.sort_by(|a, b| usage_order(a.2, a.0, b.2, b.0));
+            checkouts.sort_by(|a, b| {
+                system_only(&a.1)
+                    .cmp(&system_only(&b.1))
+                    .then_with(|| usage_order(a.2, a.0, b.2, b.0))
+            });
             for (checkout, procs, cpu_pct) in checkouts {
                 let key = RowKey::Checkout(group.key.clone(), checkout.into());
                 rows.push(CpuRow {
@@ -356,7 +372,7 @@ fn append_processes<'a>(
     for p in procs {
         rows.push(CpuRow {
             key: RowKey::Process(p.pid, p.start_time),
-            label: format!("{}  PID {}", p.name, p.pid),
+            label: p.name.clone(),
             icon: application(p).2,
             depth,
             cpu_pct: machine_pct(snap, p.cpu_pct.max(0.0)),

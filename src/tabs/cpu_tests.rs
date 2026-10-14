@@ -71,6 +71,57 @@ fn shows_application_totals_and_explanation_at_normal_and_small_sizes() {
 }
 
 #[test]
+fn expanded_processes_have_a_separate_pid_column() {
+    for (width, process_pid) in [
+        (60, 42),
+        (80, 42),
+        (140, 42),
+        (60, u32::MAX),
+        (140, u32::MAX),
+    ] {
+        let mut app = app();
+        let mut snap = app.snap.take().unwrap();
+        snap.procs[0].pid = process_pid;
+        app.history.push(&snap);
+        app.snap = Some(snap);
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let expected_pid = process_pid.to_string();
+        let screen = render(&app, width, 35);
+        let lines: Vec<_> = screen.lines().collect();
+        let header = lines
+            .iter()
+            .find(|l| l.contains("Procs") && l.contains("CPU"))
+            .unwrap();
+        let pid_column = header[..header.find("PID").expect("separate PID header")]
+            .chars()
+            .count();
+        let count_column = header[..header.find("Procs").unwrap()].chars().count();
+        let group = lines.iter().find(|l| l.contains("▾")).unwrap();
+        let leaf = lines
+            .iter()
+            .find(|l| {
+                l.contains("chrome") && !l.contains("Google Chrome") && l.contains(&expected_pid)
+            })
+            .unwrap();
+        assert!(!leaf.contains("PID"), "{leaf}");
+        let pid: String = leaf
+            .chars()
+            .skip(pid_column)
+            .take(count_column - pid_column)
+            .collect();
+        assert_eq!(pid.trim(), expected_pid, "{leaf}");
+        assert!(
+            group
+                .chars()
+                .skip(pid_column)
+                .take(count_column - pid_column)
+                .all(|c| c == ' '),
+            "{group}"
+        );
+    }
+}
+
+#[test]
 fn memory_totals_and_cpu_colors_render_for_groups_and_processes() {
     for (raw_cpu, text, color) in [
         (80.0, "10%", p::status_good()),
@@ -126,6 +177,74 @@ fn assessment_uses_actual_largest_consumer_after_banding() {
 }
 
 #[test]
+fn system_rows_are_marked_and_follow_users_even_when_they_use_more_cpu() {
+    let mut app = app();
+    let mut snap = app.snap.take().unwrap();
+    snap.procs[0].scope = crate::collect::ProcessScope::System;
+    snap.procs[0].cpu_pct = 560.0;
+    snap.procs[1].scope = crate::collect::ProcessScope::Tool;
+    app.history.push(&snap);
+    app.snap = Some(snap);
+    for mode in [cpu::GroupMode::Application, cpu::GroupMode::Project] {
+        app.user_config.cpu_group = mode;
+        let screen = render(&app, 140, 40);
+        let lines: Vec<_> = screen.lines().collect();
+        let system = lines
+            .iter()
+            .position(|l| l.contains("Google Chrome [system]"))
+            .unwrap();
+        let user = lines
+            .iter()
+            .position(|l| {
+                l.contains(if mode == cpu::GroupMode::Project {
+                    "acme/web"
+                } else {
+                    "node"
+                })
+            })
+            .unwrap();
+        assert!(user < system, "{screen}");
+        assert!(
+            screen.contains("Google Chrome is the largest observed CPU consumer (70%"),
+            "{screen}"
+        );
+    }
+    app.user_config.cpu_group = cpu::GroupMode::Application;
+    app.handle_key(KeyEvent::from(KeyCode::Down));
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let screen = render(&app, 140, 40);
+    let leaf = screen
+        .lines()
+        .find(|l| l.contains("chrome [system]"))
+        .unwrap();
+    assert!(leaf.contains("42"), "{screen}");
+}
+
+#[test]
+fn mixed_and_unknown_scopes_remain_combined_and_are_explained_in_details() {
+    let mut app = app();
+    let mut snap = app.snap.take().unwrap();
+    snap.procs.truncate(1);
+    snap.procs[0].scope = crate::collect::ProcessScope::System;
+    let mut user = snap.procs[0].clone();
+    user.pid = 43;
+    user.scope = crate::collect::ProcessScope::Tool;
+    let mut unknown = user.clone();
+    unknown.pid = 44;
+    unknown.scope = crate::collect::ProcessScope::Unknown;
+    snap.procs.extend([user, unknown]);
+    app.history.push(&snap);
+    app.snap = Some(snap);
+    let screen = render(&app, 140, 40);
+    assert!(!screen.contains("[system]"), "{screen}");
+    assert!(screen.contains("Google Chrome · 3 processes"), "{screen}");
+    assert!(
+        screen.contains("Class: 1 system · 1 tools · 1 unknown"),
+        "{screen}"
+    );
+}
+
+#[test]
 fn name_fallback_is_explained_and_expands_to_individual_processes() {
     let mut app = app();
     let mut snap = app.snap.take().unwrap();
@@ -144,8 +263,14 @@ fn name_fallback_is_explained_and_expands_to_individual_processes() {
     );
     app.handle_key(KeyEvent::from(KeyCode::Enter));
     let screen = render(&app, 120, 35);
-    assert!(screen.contains("postgres  PID 42"), "{screen}");
-    assert!(screen.contains("postgres  PID 43"), "{screen}");
+    for pid in ["42", "43"] {
+        assert!(
+            screen
+                .lines()
+                .any(|l| l.contains("postgres") && l.contains(pid)),
+            "{screen}"
+        );
+    }
 }
 
 #[test]
@@ -195,11 +320,21 @@ fn project_expansion_reveals_checkout_then_application_then_process() {
     app.handle_key(KeyEvent::from(KeyCode::Down));
     let screen = render(&app, 120, 35);
     assert!(screen.contains("node"), "{screen}");
-    assert!(!screen.contains("PID 43"), "{screen}");
+    assert!(
+        !screen
+            .lines()
+            .any(|l| l.contains("node") && l.contains("43")),
+        "{screen}"
+    );
     app.handle_key(KeyEvent::from(KeyCode::Enter));
     app.handle_key(KeyEvent::from(KeyCode::Down));
     let screen = render(&app, 120, 35);
-    assert!(screen.contains("PID 43"), "{screen}");
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains("node") && l.contains("43")),
+        "{screen}"
+    );
     assert!(screen.contains("working directory"), "{screen}");
 }
 
