@@ -108,25 +108,27 @@ fn expanded_processes_have_a_separate_pid_column() {
             .chars()
             .count();
         let count_column = header[..header.find("Procs").unwrap()].chars().count();
+        let cpu_column = header[..header.find("CPU").unwrap()].chars().count();
+        assert!(count_column < pid_column, "{header}");
         let group = lines.iter().find(|l| l.contains("▾")).unwrap();
         let leaf = lines
             .iter()
             .find(|l| {
                 l.contains("chrome") && !l.contains("Google Chrome") && l.contains(&expected_pid)
             })
-            .unwrap();
+            .unwrap_or_else(|| panic!("{screen}"));
         assert!(!leaf.contains("PID"), "{leaf}");
         let pid: String = leaf
             .chars()
             .skip(pid_column)
-            .take(count_column - pid_column)
+            .take(cpu_column - pid_column)
             .collect();
         assert_eq!(pid.trim(), expected_pid, "{leaf}");
         assert!(
             group
                 .chars()
                 .skip(pid_column)
-                .take(count_column - pid_column)
+                .take(cpu_column - pid_column)
                 .all(|c| c == ' '),
             "{group}"
         );
@@ -149,7 +151,8 @@ fn procs_column_hides_single_process_counts_but_keeps_group_counts() {
             .find(|l| l.contains("Procs") && l.contains("CPU"))
             .unwrap();
         let start = header[..header.find("Procs").unwrap()].chars().count();
-        let end = header[..header.find("CPU").unwrap()].chars().count();
+        let end = header[..header.find("PID").unwrap()].chars().count();
+        assert!(start < end, "{header}");
         let counts: Vec<_> = screen
             .lines()
             .skip_while(|line| *line != header)
@@ -265,6 +268,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         let pid_start = header[..header.find("PID").unwrap()].chars().count();
         let count_start = header[..header.find("Procs").unwrap()].chars().count();
         let cpu_start = header[..header.find("CPU").unwrap()].chars().count();
+        assert!(count_start < pid_start, "{header}");
         let table: Vec<_> = expanded
             .lines()
             .skip_while(|l| *l != header)
@@ -279,7 +283,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         assert_eq!(
             row.chars()
                 .skip(pid_start)
-                .take(count_start - pid_start)
+                .take(cpu_start - pid_start)
                 .collect::<String>()
                 .trim(),
             "1161583"
@@ -287,7 +291,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         assert!(row
             .chars()
             .skip(count_start)
-            .take(cpu_start - count_start)
+            .take(pid_start - count_start)
             .all(|c| c == ' '));
         assert!(
             expanded.contains("Working directory: /work/web/src"),

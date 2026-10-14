@@ -186,15 +186,18 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
         );
         return;
     }
-    // Give trends a quarter of the row while retaining room for names on
-    // compact terminals; cap the history window on very wide displays.
-    let trend_width = (inner.width as usize / 4).clamp(8, 48);
     let pid_width = rows
         .iter()
         .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
         .max()
         .unwrap_or(0)
         .max(3);
+    // Give trends a quarter of the row, reserving space for names, fixed
+    // columns and five separators so long PIDs remain visible.
+    let reserved_width = 12 + 5 + pid_width + 5 + 10 + 5;
+    let trend_width = (inner.width as usize / 4)
+        .clamp(8, 48)
+        .min((inner.width as usize).saturating_sub(reserved_width));
     let table_rows = rows.iter().map(|row| {
         let expanded = app.cpu.expanded.contains(&row.key);
         let marker = if row.process.is_some() {
@@ -230,12 +233,12 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
         };
         Row::new(vec![
             Cell::from(name),
-            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
             Cell::from(if row.count == 1 {
                 String::new()
             } else {
                 row.count.to_string()
             }),
+            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
             Cell::from(
                 row.cpu_pct
                     .map(|pct| format!("{pct:.0}%"))
@@ -255,8 +258,8 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
         table_rows,
         [
             Constraint::Min(12),
-            Constraint::Length(pid_width as u16),
             Constraint::Length(5),
+            Constraint::Length(pid_width as u16),
             Constraint::Length(5),
             Constraint::Length(10),
             Constraint::Length(trend_width as u16),
@@ -265,8 +268,8 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
     .header(
         Row::new([
             "Application / project",
-            "PID",
             "Procs",
+            "PID",
             "CPU",
             "Memory",
             "Recent",
