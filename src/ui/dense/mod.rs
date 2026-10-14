@@ -54,6 +54,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, History};
 use crate::collect::{ProcTick, Snapshot};
+use crate::ui::scroll::ScrollWindow;
 use crate::ui::theme::{self, Theme};
 use crate::ui::widgets::human_bytes;
 use paint::{Bind, PanelOpts, Ramp, Ramps};
@@ -109,6 +110,9 @@ pub struct DenseState {
     /// underneath the user; the detail block then flickers between processes
     /// nobody asked for.
     pub selected_pid: Option<u32>,
+    /// The process table's scroll window, moved by the renderer to follow
+    /// the selection.
+    pub scroll: ScrollWindow,
     /// The box expanded to fill the frame, by the bracketed hotkey it carries
     /// in its own border. `None` is the six-box grid.
     pub zoom: Option<u8>,
@@ -1519,8 +1523,7 @@ fn procs_box(
     let procs = sorted_procs(snap, &app.history, &app.dense);
     let visible = l.visible_procs().max(1);
     let sel = selected_index(&app.dense, &procs);
-    // Scroll the window so the selection stays inside it.
-    let first = sel.saturating_sub(visible.saturating_sub(1));
+    let first = app.dense.scroll.follow(sel, procs.len(), visible);
     let shown: Vec<&&ProcTick> = procs.iter().skip(first).take(visible).collect();
 
     let sub = format!("{}", procs.len());

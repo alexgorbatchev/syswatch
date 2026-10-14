@@ -141,7 +141,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, services: &[ServiceTick]) {
 
     let take = inner.height.saturating_sub(1) as usize;
     let sel_clamped = app.service_sel.min(services.len().saturating_sub(1));
-    let start = sel_clamped.saturating_sub(take.saturating_sub(1));
+    let start = app.service_scroll.follow(sel_clamped, services.len(), take);
     let end = (start + take).min(services.len());
 
     let mut lines = vec![header];

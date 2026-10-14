@@ -25,6 +25,7 @@ use crate::insights::{self, Insight};
 use crate::tabs;
 use crate::ui::chrome;
 use crate::ui::graph::GraphStyle;
+use crate::ui::scroll::{window_start, ScrollWindow};
 
 pub struct Options {
     pub start_tab: Option<String>,
@@ -545,12 +546,18 @@ pub struct App {
     pub proc_sort: ProcSort,
     pub proc_sel: usize,
     pub cpu: crate::cpu::CpuState,
+    /// The Procs table's scroll window, moved by the renderer to follow
+    /// `proc_sel`.
+    pub proc_scroll: ScrollWindow,
     /// Whether the Procs tab shows its drill-in detail pane (which carries the
     /// selected process's started date and other per-proc detail). Toggled
     /// with `d`; off reclaims those rows for the process list (issue #13).
     pub proc_show_detail: bool,
     pub service_sort: ServiceSort,
     pub service_sel: usize,
+    /// The Services table's scroll window, moved by the renderer to follow
+    /// `service_sel`.
+    pub service_scroll: ScrollWindow,
     pub insights: Vec<Insight>,
     /// Scrub offset in ticks back from "now" (0 = live). Driven by Timeline's
     /// arrow keys; clamped to session length. Affects every tab via
@@ -665,9 +672,11 @@ impl App {
             proc_sort: ProcSort::Cpu,
             proc_sel: 0,
             cpu: crate::cpu::CpuState::default(),
+            proc_scroll: ScrollWindow::default(),
             proc_show_detail: true,
             service_sort: ServiceSort::Name,
             service_sel: 0,
+            service_scroll: ScrollWindow::default(),
             insights: Vec::new(),
             scrub_offset: 0,
             graph_style,
@@ -1288,20 +1297,11 @@ fn clamp_lite_scroll(lite: &mut LiteState, count: usize, visible: u16) {
         return;
     }
     lite.selected = lite.selected.min(count - 1);
-    let visible = visible.max(1) as usize;
-
-    if lite.selected < lite.offset {
-        lite.offset = lite.selected;
-    }
     // The detail block consumes rows *below* the selected row, so when it's
     // open the selection must sit at least DETAIL_ROWS above the window
-    // bottom. `visible` already excludes those rows, so the same arithmetic
+    // bottom. `visible` already excludes those rows, so the same window
     // covers both cases.
-    if lite.selected >= lite.offset + visible {
-        lite.offset = lite.selected + 1 - visible;
-    }
-    let max_offset = count.saturating_sub(visible);
-    lite.offset = lite.offset.min(max_offset);
+    lite.offset = window_start(lite.offset, lite.selected, count, visible as usize);
 }
 
 pub fn run(opts: Options) -> Result<()> {
@@ -2112,6 +2112,154 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(app.lite.filter_text.is_empty());
+    }
+
+    /// Render one frame the way the event loop does and return its rows.
+    fn render_rows(app: &App, w: u16, h: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let snap = app.displayed_snap().expect("test app has a snapshot");
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app, snap)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn row_of(rows: &[String], needle: &str) -> Option<usize> {
+        rows.iter().position(|r| r.contains(needle))
+    }
+
+    /// Press `key` `n` times, drawing a 120×30 frame after each press like
+    /// the event loop does — the scroll window is only known at render time.
+    fn press_and_draw(app: &mut App, key: crossterm::event::KeyCode, n: usize) {
+        for _ in 0..n {
+            app.handle_key(crossterm::event::KeyEvent::from(key));
+            render_rows(app, 120, 30);
+        }
+    }
+
+    /// Moving up from the bottom of a long Procs list moves the cursor, not
+    /// the list. Deriving the window from the selection alone pinned the
+    /// cursor to the bottom row and scrolled everything under it instead.
+    #[test]
+    fn procs_cursor_moves_up_without_scrolling_the_list() {
+        use crate::config::SyswatchConfig;
+        use crossterm::event::KeyCode;
+
+        let mut app = App::new(TabId::Procs, SyswatchConfig::default());
+        app.snap = Some(snap_with(
+            (0..60).map(|i| proc(1000 + i, 90.0 - i as f32)).collect(),
+        ));
+
+        press_and_draw(&mut app, KeyCode::Down, 59);
+        let bottom = render_rows(&app, 120, 30);
+        let last = row_of(&bottom, " 1059 ").expect("last process on screen");
+
+        press_and_draw(&mut app, KeyCode::Up, 3);
+        let after = render_rows(&app, 120, 30);
+        assert_eq!(app.proc_sel, 56);
+        assert_eq!(
+            row_of(&after, " 1059 "),
+            Some(last),
+            "the list scrolled under the cursor:\n{}",
+            after.join("\n")
+        );
+        assert_eq!(row_of(&after, " 1056 "), Some(last - 3));
+
+        // Back up past the top of the window, the list does scroll — and the
+        // selection becomes its first row.
+        press_and_draw(&mut app, KeyCode::Up, 56);
+        let top = render_rows(&app, 120, 30);
+        let first = row_of(&top, " 1000 ").expect("first process on screen");
+        assert_eq!(row_of(&top, " 1001 "), Some(first + 1));
+    }
+
+    /// The same windowing contract as Procs, for the Services table.
+    #[test]
+    fn services_cursor_moves_up_without_scrolling_the_list() {
+        use crate::collect::{ServiceStatus, ServiceTick};
+        use crate::config::SyswatchConfig;
+        use crossterm::event::KeyCode;
+
+        let mut app = App::new(TabId::Services, SyswatchConfig::default());
+        app.snap = Some(Snapshot {
+            services: (0..60)
+                .map(|i| ServiceTick {
+                    name: format!("svc-{i:02}.service"),
+                    status: ServiceStatus::Running,
+                    pid: None,
+                    exit_code: None,
+                    detail: String::new(),
+                })
+                .collect(),
+            ..Default::default()
+        });
+
+        press_and_draw(&mut app, KeyCode::Down, 59);
+        let bottom = render_rows(&app, 120, 30);
+        let last = row_of(&bottom, "svc-59").expect("last service on screen");
+
+        press_and_draw(&mut app, KeyCode::Up, 3);
+        let after = render_rows(&app, 120, 30);
+        assert_eq!(app.service_sel, 56);
+        // The detail pane below the table names the selection too; `row_of`
+        // takes the first match, which is the table row above it.
+        assert_eq!(
+            row_of(&after, "svc-59"),
+            Some(last),
+            "the list scrolled under the cursor:\n{}",
+            after.join("\n")
+        );
+    }
+
+    /// The same windowing contract for Dense's process table, whose footer
+    /// reports the window as `first-last of N`.
+    #[test]
+    fn dense_cursor_moves_up_without_scrolling_the_table() {
+        use crate::config::SyswatchConfig;
+        use crate::ui::dense::{Layout, GRID_H, GRID_W};
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let _g = crate::ui::theme::exclusive_theme();
+        let mut app = App::new(TabId::Overview, SyswatchConfig::default());
+        app.view_mode = ViewMode::Dense;
+        app.last_area = Rect::new(0, 0, GRID_W, GRID_H);
+        // Two points apart so every row sits in its own load band and Dense
+        // orders them simply by pid.
+        let s = snap_with(
+            (0..40)
+                .map(|i| proc(100 + i, 90.0 - i as f32 * 2.0))
+                .collect(),
+        );
+        app.history.push(&s);
+        app.snap = Some(s);
+
+        let press = |app: &mut App, key: KeyCode, n: usize| -> String {
+            for _ in 0..n {
+                app.handle_key(KeyEvent::from(key));
+                render_rows(app, GRID_W, GRID_H);
+            }
+            render_rows(app, GRID_W, GRID_H).join("\n")
+        };
+
+        let visible = Layout::new(app.last_area).visible_procs();
+        let window = format!("{}-40 of 40", 41 - visible);
+        let screen = press(&mut app, KeyCode::End, 1);
+        assert!(screen.contains(&window), "at the bottom:\n{screen}");
+
+        let screen = press(&mut app, KeyCode::Up, 3);
+        assert_eq!(app.dense.selected, 36);
+        assert!(
+            screen.contains(&window),
+            "the table scrolled under the cursor:\n{screen}"
+        );
     }
 
     #[test]

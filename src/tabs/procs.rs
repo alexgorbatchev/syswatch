@@ -213,8 +213,7 @@ fn draw_table(
 
     let take = inner.height.saturating_sub(1) as usize;
     let sel_clamped = app.proc_sel.min(procs.len().saturating_sub(1));
-    // Scroll: keep selection visible.
-    let start = sel_clamped.saturating_sub(take.saturating_sub(1));
+    let start = app.proc_scroll.follow(sel_clamped, procs.len(), take);
     let end = (start + take).min(procs.len());
 
     let mut lines = vec![header];

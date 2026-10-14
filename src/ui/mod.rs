@@ -4,6 +4,7 @@ pub mod graph;
 pub mod help;
 pub mod lite;
 pub mod palette;
+pub mod scroll;
 pub mod settings;
 pub mod theme;
 pub mod widgets;
