@@ -5,6 +5,11 @@ use std::time::SystemTime;
 use crate::collect::{ProcTick, ProcessScope, Snapshot};
 
 mod icons;
+mod location;
+mod ownership;
+mod tree;
+
+use ownership::Ownership;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,14 +36,9 @@ impl GroupMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GroupKey {
-    Application {
-        identity: String,
-    },
-    Project {
-        host: String,
-        repo: String,
-        user: String,
-    },
+    Application { identity: String },
+    Directory { path: String },
+    Project { host: String, repo: String },
 }
 
 pub struct CpuGroup<'a> {
@@ -64,7 +64,8 @@ pub struct GroupTotals {
 impl GroupTotals {
     pub fn new(snap: &Snapshot) -> Self {
         let totals = |mode| {
-            groups(snap, mode)
+            let ownership = Ownership::in_mode(snap, mode);
+            group_processes(snap, mode, snap.procs.iter(), &ownership)
                 .into_iter()
                 .filter_map(|g| g.cpu_pct.filter(|v| *v > 0.0).map(|v| (g.key, v)))
                 .collect()
@@ -101,6 +102,12 @@ pub fn application(p: &ProcTick) -> (String, String, char) {
         .or_else(|| exe.and_then(claude_native_name))
         .unwrap_or(basename);
     let app_name = name.strip_suffix(" (deleted)").unwrap_or(name);
+    // Node tools can set their OS process title (for example Pi). Generic
+    // runtime/thread titles retain the executable identity. Never parse cmd.
+    let title = matches!(app_name, "node" | "nodejs")
+        && !matches!(p.name.as_str(), "" | "node" | "nodejs" | "MainThread");
+    let name = if title { p.name.as_str() } else { name };
+    let app_name = name.strip_suffix(" (deleted)").unwrap_or(name);
     let lower = app_name.to_ascii_lowercase();
     let known = icons::known_application(lower.trim_end_matches(".exe"));
     if let Some((label, icon)) = known {
@@ -114,8 +121,16 @@ pub fn application(p: &ProcTick) -> (String, String, char) {
     };
     (
         identity,
-        name.into(),
-        icons::for_name(lower.trim_end_matches(".exe")),
+        if title && basename.ends_with(" (deleted)") && !name.ends_with(" (deleted)") {
+            format!("{name} (deleted)")
+        } else {
+            name.into()
+        },
+        icons::for_name(if title {
+            basename.strip_suffix(" (deleted)").unwrap_or(basename)
+        } else {
+            lower.trim_end_matches(".exe")
+        }),
     )
 }
 
@@ -135,43 +150,30 @@ fn claude_native_name(exe: &str) -> Option<&'static str> {
 }
 
 pub fn groups(snap: &Snapshot, mode: GroupMode) -> Vec<CpuGroup<'_>> {
-    group_processes(snap, mode, snap.procs.iter())
+    group_processes(
+        snap,
+        mode,
+        snap.procs.iter(),
+        &Ownership::in_mode(snap, mode),
+    )
 }
 
 fn group_processes<'a>(
     snap: &Snapshot,
     mode: GroupMode,
     procs: impl IntoIterator<Item = &'a ProcTick>,
+    ownership: &Ownership<'_>,
 ) -> Vec<CpuGroup<'a>> {
     let mut grouped = BTreeMap::new();
     for process in procs {
-        let (key, label, icon) = if let Some(project) = process
-            .project
-            .as_ref()
-            .filter(|_| mode == GroupMode::Project)
-        {
-            let repo_key = if project.host.is_empty() {
-                project.checkout.clone()
+        let owner = ownership.owner(process);
+        let (key, label, icon) =
+            if let Some(location) = location::of(process).filter(|_| mode == GroupMode::Project) {
+                location.group()
             } else {
-                project.repo.clone()
+                let (identity, label, icon) = application(owner);
+                (GroupKey::Application { identity }, label, icon)
             };
-            (
-                GroupKey::Project {
-                    host: project.host.clone(),
-                    repo: repo_key,
-                    user: process.user.clone(),
-                },
-                project.repo.clone(),
-                if project.host == "github.com" {
-                    '\u{f402}'
-                } else {
-                    '\u{e702}'
-                },
-            )
-        } else {
-            let (identity, label, icon) = application(process);
-            (GroupKey::Application { identity }, label, icon)
-        };
         let group = grouped.entry(key.clone()).or_insert_with(|| CpuGroup {
             key,
             label,
@@ -190,7 +192,7 @@ fn group_processes<'a>(
             && group
                 .members
                 .iter()
-                .any(|p| !application(p).1.ends_with(" (deleted)"))
+                .any(|p| !application(ownership.owner(p)).1.ends_with(" (deleted)"))
         {
             group.label.truncate(group.label.len() - " (deleted)".len());
         }
@@ -221,6 +223,7 @@ fn usage_order(a: Option<f32>, a_name: &str, b: Option<f32>, b_name: &str) -> st
     let band = |pct: Option<f32>| (pct.unwrap_or(0.0).max(0.0) / 5.0).floor();
     band(b)
         .total_cmp(&band(a))
+        .then_with(|| b_name.starts_with('~').cmp(&a_name.starts_with('~')))
         .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
         .then_with(|| a_name.cmp(b_name))
 }
@@ -250,8 +253,9 @@ pub fn assessment(snap: &Snapshot) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RowKey {
     Group(GroupKey),
-    Checkout(GroupKey, String),
-    CheckoutApplication(GroupKey, String, GroupKey),
+    Directory(GroupKey, String),
+    Application(Box<RowKey>, GroupKey),
+    Helper(Box<RowKey>, Vec<String>),
     Process(u32, Option<SystemTime>),
 }
 
@@ -273,15 +277,37 @@ pub struct CpuRow<'a> {
     pub mem_rss: u64,
     pub count: usize,
     pub process: Option<&'a ProcTick>,
+    pub owner: Option<&'a ProcTick>,
     pub members: Vec<&'a ProcTick>,
     pub group: GroupKey,
 }
 
-pub fn rows<'a>(snap: &'a Snapshot, groups: &[CpuGroup<'a>], state: &CpuState) -> Vec<CpuRow<'a>> {
+impl<'a> CpuRow<'a> {
+    fn collapse_single(mut self, ownership: &Ownership<'a>) -> Self {
+        // Project and folder rows preserve navigation even for a single PID.
+        if !matches!(self.group, GroupKey::Application { .. }) {
+            return self;
+        }
+        if let [process] = self.members.as_slice() {
+            self.key = RowKey::Process(process.pid, process.start_time);
+            self.process = Some(process);
+            self.owner = Some(ownership.owner(process));
+        }
+        self
+    }
+}
+
+pub fn rows<'a>(
+    snap: &'a Snapshot,
+    mode: GroupMode,
+    groups: &[CpuGroup<'a>],
+    state: &CpuState,
+) -> Vec<CpuRow<'a>> {
     let mut rows = Vec::new();
+    let ownership = Ownership::in_mode(snap, mode);
     for group in groups {
         let key = RowKey::Group(group.key.clone());
-        rows.push(CpuRow {
+        let row = CpuRow {
             key: key.clone(),
             label: group.label.clone(),
             icon: group.icon,
@@ -290,98 +316,131 @@ pub fn rows<'a>(snap: &'a Snapshot, groups: &[CpuGroup<'a>], state: &CpuState) -
             mem_rss: group.members.iter().map(|p| p.mem_rss).sum(),
             count: group.members.len(),
             process: None,
+            owner: None,
             members: group.members.clone(),
             group: group.key.clone(),
-        });
-        if !state.expanded.contains(&key) {
+        }
+        .collapse_single(&ownership);
+        let expandable = row.process.is_none();
+        rows.push(row);
+        if !expandable || !state.expanded.contains(&key) {
             continue;
         }
         if matches!(group.key, GroupKey::Project { .. }) {
-            let mut checkouts: BTreeMap<&str, Vec<&ProcTick>> = BTreeMap::new();
+            let mut directories: BTreeMap<&str, Vec<&ProcTick>> = BTreeMap::new();
             for p in &group.members {
                 if let Some(project) = &p.project {
-                    checkouts.entry(&project.checkout).or_default().push(p);
+                    directories.entry(&project.checkout).or_default().push(p);
                 }
             }
-            let mut checkouts: Vec<_> = checkouts
+            let mut directories: Vec<_> = directories
                 .into_iter()
                 .map(|(path, procs)| {
                     let cpu = machine_pct(snap, procs.iter().map(|p| p.cpu_pct.max(0.0)).sum());
-                    (path, procs, cpu)
+                    (path, procs, cpu, display_path(path))
                 })
                 .collect();
-            checkouts.sort_by(|a, b| {
+            directories.sort_by(|a, b| {
                 system_only(&a.1)
                     .cmp(&system_only(&b.1))
-                    .then_with(|| usage_order(a.2, a.0, b.2, b.0))
+                    .then_with(|| usage_order(a.2, &a.3, b.2, &b.3))
             });
-            for (checkout, procs, cpu_pct) in checkouts {
-                let key = RowKey::Checkout(group.key.clone(), checkout.into());
-                rows.push(CpuRow {
+            for (path, procs, cpu_pct, label) in directories {
+                let key = RowKey::Directory(group.key.clone(), path.into());
+                let row = CpuRow {
                     key: key.clone(),
-                    label: display_path(checkout),
-                    icon: '\u{e702}',
+                    label,
+                    icon: '\u{f07b}',
                     depth: 1,
                     cpu_pct,
                     mem_rss: procs.iter().map(|p| p.mem_rss).sum(),
                     count: procs.len(),
                     process: None,
+                    owner: None,
                     members: procs.clone(),
                     group: group.key.clone(),
-                });
-                if state.expanded.contains(&key) {
-                    for app in group_processes(snap, GroupMode::Application, procs.iter().copied())
-                    {
-                        let key = RowKey::CheckoutApplication(
-                            group.key.clone(),
-                            checkout.into(),
-                            app.key.clone(),
-                        );
-                        rows.push(CpuRow {
-                            key: key.clone(),
-                            label: app.label,
-                            icon: app.icon,
-                            depth: 2,
-                            cpu_pct: app.cpu_pct,
-                            mem_rss: app.members.iter().map(|p| p.mem_rss).sum(),
-                            count: app.members.len(),
-                            process: None,
-                            members: app.members.clone(),
-                            group: app.key.clone(),
-                        });
-                        if state.expanded.contains(&key) {
-                            append_processes(&mut rows, snap, &app.members, &app.key, 3);
-                        }
-                    }
+                }
+                .collapse_single(&ownership);
+                let expandable = row.process.is_none();
+                rows.push(row);
+                if expandable && state.expanded.contains(&key) {
+                    append_applications(&mut rows, snap, &procs, &key, 2, state, &ownership);
                 }
             }
+        } else if matches!(group.key, GroupKey::Directory { .. }) {
+            append_applications(&mut rows, snap, &group.members, &key, 1, state, &ownership);
         } else {
-            append_processes(&mut rows, snap, &group.members, &group.key, 1);
+            tree::append(&mut rows, snap, group, &key, 1, state, &ownership);
+        }
+    }
+    if mode == GroupMode::Project {
+        // Location boundaries affect grouping, while details retain the
+        // owning tool across the complete process ancestry.
+        let global = Ownership::new(snap);
+        for row in &mut rows {
+            row.owner = row.process.map(|p| global.owner(p));
         }
     }
     rows
 }
 
-fn append_processes<'a>(
+fn append_applications<'a>(
     rows: &mut Vec<CpuRow<'a>>,
     snap: &Snapshot,
     procs: &[&'a ProcTick],
+    context: &RowKey,
+    depth: usize,
+    state: &CpuState,
+    ownership: &Ownership<'a>,
+) {
+    for app in group_processes(
+        snap,
+        GroupMode::Application,
+        procs.iter().copied(),
+        ownership,
+    ) {
+        let key = RowKey::Application(Box::new(context.clone()), app.key.clone());
+        let row = CpuRow {
+            key: key.clone(),
+            label: app.label.clone(),
+            icon: app.icon,
+            depth,
+            cpu_pct: app.cpu_pct,
+            mem_rss: app.members.iter().map(|p| p.mem_rss).sum(),
+            count: app.members.len(),
+            process: None,
+            owner: None,
+            members: app.members.clone(),
+            group: app.key.clone(),
+        }
+        .collapse_single(ownership);
+        let expandable = row.process.is_none();
+        rows.push(row);
+        if expandable && state.expanded.contains(&key) {
+            tree::append(rows, snap, &app, &key, depth + 1, state, ownership);
+        }
+    }
+}
+
+fn process_row<'a>(
+    snap: &Snapshot,
+    p: &'a ProcTick,
+    owner: &'a ProcTick,
     group: &GroupKey,
     depth: usize,
-) {
-    for p in procs {
-        rows.push(CpuRow {
-            key: RowKey::Process(p.pid, p.start_time),
-            label: p.name.clone(),
-            icon: application(p).2,
-            depth,
-            cpu_pct: machine_pct(snap, p.cpu_pct.max(0.0)),
-            mem_rss: p.mem_rss,
-            count: 1,
-            process: Some(p),
-            members: vec![p],
-            group: group.clone(),
-        });
+) -> CpuRow<'a> {
+    CpuRow {
+        key: RowKey::Process(p.pid, p.start_time),
+        label: p.name.clone(),
+        icon: application(p).2,
+        depth,
+        cpu_pct: machine_pct(snap, p.cpu_pct.max(0.0)),
+        mem_rss: p.mem_rss,
+        count: 1,
+        process: Some(p),
+        owner: Some(owner),
+        members: vec![p],
+        group: group.clone(),
     }
 }
 

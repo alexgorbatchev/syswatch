@@ -1,0 +1,59 @@
+//! Snapshot-only location identities for grouping and ancestry boundaries.
+use super::{display_path, GroupKey};
+use crate::collect::ProcTick;
+
+#[derive(PartialEq, Eq)]
+pub(super) enum Location<'a> {
+    Checkout {
+        host: &'a str,
+        repo: &'a str,
+        path: &'a str,
+    },
+    Directory(&'a str),
+}
+
+pub(super) fn of(process: &ProcTick) -> Option<Location<'_>> {
+    if let Some(project) = &process.project {
+        Some(Location::Checkout {
+            host: &project.host,
+            repo: &project.repo,
+            path: &project.checkout,
+        })
+    } else {
+        process
+            .cwd
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .map(Location::Directory)
+    }
+}
+
+impl Location<'_> {
+    pub fn group(&self) -> (GroupKey, String, char) {
+        match self {
+            Self::Checkout { host, repo, path } => (
+                GroupKey::Project {
+                    host: (*host).into(),
+                    repo: if host.is_empty() {
+                        (*path).into()
+                    } else {
+                        (*repo).into()
+                    },
+                },
+                (*repo).into(),
+                if *host == "github.com" {
+                    '\u{f402}'
+                } else {
+                    '\u{e702}'
+                },
+            ),
+            Self::Directory(path) => (
+                GroupKey::Directory {
+                    path: (*path).into(),
+                },
+                display_path(path),
+                '\u{f07b}',
+            ),
+        }
+    }
+}

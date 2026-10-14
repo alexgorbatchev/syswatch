@@ -51,7 +51,8 @@ The CPU tab starts with an assessment of CPU activity and available waiting-pres
 measurements, followed by applications with system-only groups at the bottom.
 Within each section, applications sort into descending 5% CPU bands
 (10–under 15%, 5–under 10%, 0–under 5%, for example), alphabetically within each band.
-The same ordering applies to checkout, application and process rows when expanded. Chrome
+Home-directory labels (`~` and `~/…`) sort before other names within the same band.
+The same ordering applies to directory, checkout, application and process rows when expanded. Chrome
 and its helpers share an application row. `Enter` expands a row and `↑` / `↓`
 selects processes to inspect their command, user and working directory.
 
@@ -64,26 +65,55 @@ not determine the category. PostgreSQL, Redis, Docker, VMs, runtimes, shells and
 other tools stay in the first section. Unrecognized programs and processes with
 missing identities stay there too. Details show system, tool and unknown counts.
 Mixed groups remain combined in the first section. Expanded process rows have
-a separate PID column. Application grouping uses executable identities rather
-than process ancestry; a tool running under Node can therefore appear under node.
+a separate PID column. The Procs column is blank for a count of one.
+Application and helper branches containing only one PID render directly as process
+rows, with no duplicate application wrapper. Project, directory and checkout rows
+remain separate expandable rows even when they contain a single PID. Expand the
+project and checkout, or the non-Git directory, to reach its process row.
 
-Press `b` to group by Git project instead. Attribution follows each process's
+Application rows include the owning tool and its descendant helpers, counting each
+PID once in the top-level totals. Expand a tool to see its own PIDs and expandable
+helper application groups; consecutive generations of the same application share
+one helper group. Helper totals include their descendants. Process details show the
+actual parent PID and owning tool. Independent Node workloads stay separate from
+Node helpers owned by Pi or another tool.
+
+Shells launched without arguments (including login-style names) stop ownership
+traversal, separating tools from terminal/session launchers. Shells with unavailable
+command lines also stop traversal; command/script shells pass ownership through.
+Recognized OS/session helpers,
+terminal emulators, session managers and multiplexers stop ownership traversal.
+Missing parents, parent PIDs newer than their children, and cyclic parent links
+are not used to infer ownership. Reparented/orphaned helpers therefore may appear
+as independent applications. Attribution uses only the displayed snapshot, including
+while scrubbing history or replaying a recording.
+
+Press `b` to group by project or working directory instead. Attribution follows each process's own
 working directory to its repository and reads `origin` locally, without contacting
 the remote. Network origins group by host and repository; checkout rows distinguish
-worktrees. Expand a checkout to see applications with combined CPU totals and process
-counts, using the same grouping as the Application view. Expand an application to
-see its individual processes. Application expansion is independent for each checkout.
-Repositories without a network origin remain separate local projects.
-Processes with unavailable working directories or no discovered repository remain
-under applications. Discovery results are cached for up to 30 seconds.
+worktrees and combine working subdirectories beneath their checkout root.
+Repositories without a network origin remain separate local projects. A known
+working directory without a discovered repository gets its own directory row.
+Projects and directories combine OS users; details list their owners.
+
+Expand a checkout or directory to see applications with combined CPU, memory and
+process counts, then expand an application to see its PIDs and helper groups.
+Parent relationships group tools with helpers within the same checkout or non-Git
+directory. Helpers in another location move to that location's group; their details
+still show the global owning tool and actual parent PID. Processes with unavailable
+working directories and no project metadata fall back to application groups.
+Expansion is independent for each checkout and directory. Discovery results are
+cached for up to 30 seconds.
 
 Matching application names share one row across OS users and installed versions.
 Names come from executable basenames or macOS bundles, falling back to the OS-reported
 process name when the path is unavailable. Details list distinct owners and executable
 paths, including how many processes have unavailable paths. Processes without either
-a name or an executable remain individual. Expanding an application still shows each
-process separately. In Project view, applications combine within each checkout;
-different projects and checkouts retain their own application rows.
+a name or an executable remain individual. A distinct OS-reported Node process title
+(such as `pi`) identifies the tool; generic `node` and `MainThread` names retain the
+Node identity. Command-line substrings do not determine identity. In Project view,
+applications combine within each checkout or non-Git directory;
+different locations retain their own application rows.
 Claude Code's native `claude/versions/<version>` executables and helpers share a
 `claude` application row; their versioned executable paths remain in details.
 

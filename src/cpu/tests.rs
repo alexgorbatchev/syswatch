@@ -1,6 +1,10 @@
 use super::*;
 use crate::collect::{CpuTick, ProcTick, ProcessScope, ProjectIdentity, Snapshot};
 
+mod directories;
+mod parents;
+mod singletons;
+
 fn process(pid: u32, exe: &str, cpu: f32) -> ProcTick {
     ProcTick {
         pid,
@@ -125,8 +129,9 @@ fn system_only_groups_follow_other_groups_before_cpu_banding() {
         );
         let mut state = CpuState::default();
         state.expanded.insert(RowKey::Group(node.key.clone()));
-        let leaves: Vec<_> = rows(&snap, &grouped, &state)
+        let leaves: Vec<_> = rows(&snap, mode, &grouped, &state)
             .iter()
+            .filter(|row| row.group == node.key)
             .filter_map(|row| row.process.map(|p| p.pid))
             .collect();
         assert_eq!(leaves, [8, 7]);
@@ -166,12 +171,12 @@ fn system_priority_applies_to_projects_checkouts_and_nested_applications() {
     assert_eq!(grouped[1].label, "acme/system");
     let mut state = CpuState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
-    for row in rows(&snap, &grouped, &state) {
+    for row in rows(&snap, GroupMode::Project, &grouped, &state) {
         if row.depth == 1 {
             state.expanded.insert(row.key);
         }
     }
-    let expanded = rows(&snap, &grouped, &state);
+    let expanded = rows(&snap, GroupMode::Project, &grouped, &state);
     assert_eq!(
         expanded
             .iter()
@@ -193,7 +198,7 @@ fn system_priority_applies_to_projects_checkouts_and_nested_applications() {
     changed.procs[0].scope = ProcessScope::System;
     changed.procs[1].scope = ProcessScope::System;
     let changed_groups = groups(&changed, GroupMode::Project);
-    let changed_rows = rows(&changed, &changed_groups, &state);
+    let changed_rows = rows(&changed, GroupMode::Project, &changed_groups, &state);
     assert_eq!(
         changed_rows[selected_index(&changed_rows, &state)].key,
         expanded[1].key
@@ -221,7 +226,7 @@ fn claude_native_versions_and_helpers_share_the_application_name() {
         assert_eq!(grouped[0].members.len(), 4);
         assert_eq!(grouped[0].cpu_pct, Some(40.0));
         assert_eq!(
-            rows(&snap, &grouped, &CpuState::default())[0].mem_rss,
+            rows(&snap, mode, &grouped, &CpuState::default())[0].mem_rss,
             10 * 1024
         );
         assert_eq!(grouped[0].icon, application(&snap.procs[3]).2);
@@ -283,7 +288,7 @@ fn process_rows_use_machine_cpu_bands_and_keep_selection_after_reordering() {
     let mut state = CpuState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
     state.selected = Some(RowKey::Process(2, None));
-    let first = rows(&snap, &grouped, &state);
+    let first = rows(&snap, GroupMode::Application, &grouped, &state);
     assert_eq!(
         first
             .iter()
@@ -294,7 +299,7 @@ fn process_rows_use_machine_cpu_bands_and_keep_selection_after_reordering() {
     assert_eq!(selected_index(&first, &state), 2);
     snap.procs[1].cpu_pct = 120.0;
     let grouped = groups(&snap, GroupMode::Application);
-    let second = rows(&snap, &grouped, &state);
+    let second = rows(&snap, GroupMode::Application, &grouped, &state);
     assert_eq!(
         second
             .iter()
@@ -371,7 +376,10 @@ fn same_application_names_combine_installations_and_owners() {
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].members.len(), 3);
         assert_eq!(grouped[0].cpu_pct, Some(3.0));
-        assert_eq!(rows(&snap, &grouped, &CpuState::default())[0].mem_rss, 2048);
+        assert_eq!(
+            rows(&snap, mode, &grouped, &CpuState::default())[0].mem_rss,
+            2048
+        );
         assert_eq!(GroupTotals::new(&snap).get(mode, &grouped[0].key), 3.0);
     }
     let key = groups(&snap, GroupMode::Application)[0].key.clone();
@@ -407,7 +415,7 @@ fn unavailable_executables_group_same_names_and_unknown_owners_in_both_modes() {
             assert_eq!(grouped[0].cpu_pct, Some(30.0));
             let mut state = CpuState::default();
             state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
-            let expanded = rows(&snap, &grouped, &state);
+            let expanded = rows(&snap, mode, &grouped, &state);
             assert_eq!(expanded[0].mem_rss, 3072);
             assert_eq!(expanded.len(), 3);
             assert_ne!(expanded[1].key, expanded[2].key);
@@ -560,8 +568,9 @@ fn system_icons_do_not_merge_distinct_services() {
     assert_ne!(grouped[1].key, grouped[2].key);
     let mut state = CpuState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
-    let expanded = rows(&snap, &grouped, &state);
-    assert_eq!(expanded[1].icon, grouped[0].icon);
+    let expanded = rows(&snap, GroupMode::Application, &grouped, &state);
+    assert_eq!(expanded[0].icon, grouped[0].icon);
+    assert_eq!(expanded[0].process.unwrap().pid, 1);
 }
 
 #[test]
@@ -587,12 +596,12 @@ fn checkout_applications_aggregate_and_expand_independently() {
     let grouped = groups(&snap, GroupMode::Project);
     let mut state = CpuState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
-    for row in rows(&snap, &grouped, &state) {
+    for row in rows(&snap, GroupMode::Project, &grouped, &state) {
         if row.depth == 1 {
             state.expanded.insert(row.key);
         }
     }
-    let collapsed = rows(&snap, &grouped, &state);
+    let collapsed = rows(&snap, GroupMode::Project, &grouped, &state);
     assert_eq!(collapsed[0].mem_rss, 10 * 1024);
     let checkouts: Vec<_> = collapsed.iter().filter(|r| r.depth == 1).collect();
     assert_eq!(
@@ -601,26 +610,27 @@ fn checkout_applications_aggregate_and_expand_independently() {
     );
     let apps: Vec<_> = collapsed.iter().filter(|r| r.depth == 2).collect();
     assert_eq!(apps.len(), 3);
-    assert!(apps.iter().all(|r| r.process.is_none()));
+    assert!(checkouts.iter().all(|r| r.process.is_none()));
+    assert_eq!(apps.iter().filter(|r| r.process.is_none()).count(), 1);
     let main_node = apps.iter().find(|r| r.count == 2).unwrap();
     assert_eq!(main_node.label, "node");
     assert_eq!(main_node.cpu_pct, Some(30.0));
     assert_eq!(main_node.mem_rss, 3 * 1024);
     assert_eq!(main_node.icon, application(&snap.procs[0]).2);
     state.expanded.insert(main_node.key.clone());
-    let expanded = rows(&snap, &grouped, &state);
+    let expanded = rows(&snap, GroupMode::Project, &grouped, &state);
     let leaves: Vec<_> = expanded
         .iter()
         .filter_map(|r| r.process.map(|p| (r.depth, p.pid)))
         .collect();
-    assert_eq!(leaves, vec![(3, 1), (3, 2)]);
+    assert_eq!(leaves, vec![(2, 4), (3, 1), (3, 2), (2, 3)]);
     assert_eq!(
         expanded
             .iter()
             .filter(|r| r.process.is_some())
             .map(|r| r.mem_rss)
             .sum::<u64>(),
-        main_node.mem_rss
+        collapsed[0].mem_rss
     );
     // Application sorting and totals match the normal view for this checkout.
     let local = snapshot(snap.procs[..3].to_vec());

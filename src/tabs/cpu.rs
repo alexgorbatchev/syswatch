@@ -19,7 +19,7 @@ mod tests;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let groups = cpu::groups(snap, app.user_config.cpu_group);
-    let rows = cpu::rows(snap, &groups, &app.cpu);
+    let rows = cpu::rows(snap, app.user_config.cpu_group, &groups, &app.cpu);
     let selected = cpu::selected_index(&rows, &app.cpu);
     let roomy = area.height >= 24;
     let show_detail = roomy || (!app.cpu.show_cores && rows.get(selected).is_some());
@@ -83,7 +83,11 @@ fn draw_assessment(f: &mut Frame, area: Rect, snap: &Snapshot, groups: &[CpuGrou
             top.cpu_pct.unwrap_or(0.0)
         )));
         lines.push(Line::styled(
-            "Expand to inspect its processes. High usage alone does not establish a fault.",
+            if top.members.len() == 1 && matches!(top.key, GroupKey::Application { .. }) {
+                "Select its row to inspect process details. High usage alone does not establish a fault."
+            } else {
+                "Expand to inspect its processes. High usage alone does not establish a fault."
+            },
             Style::default().fg(p::text_muted()),
         ));
     } else {
@@ -227,7 +231,11 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
         Row::new(vec![
             Cell::from(name),
             Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
-            Cell::from(row.count.to_string()),
+            Cell::from(if row.count == 1 {
+                String::new()
+            } else {
+                row.count.to_string()
+            }),
             Cell::from(
                 row.cpu_pct
                     .map(|pct| format!("{pct:.0}%"))
@@ -314,6 +322,13 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                 "PID {} · parent {} · user {} · {scope}",
                 process.pid, process.ppid, process.user
             )));
+            if let Some(owner) = row.owner.filter(|owner| owner.pid != process.pid) {
+                lines.push(Line::raw(format!(
+                    "Owning tool: {} · PID {}",
+                    cpu::application(owner).1,
+                    owner.pid
+                )));
+            }
             lines.push(Line::raw(format!("Command: {}", process.cmd)));
             lines.push(Line::raw(format!(
                 "Working directory: {}",
@@ -355,10 +370,34 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                 "{} {} · {} processes · {scope}",
                 row.icon, row.label, row.count
             )));
+            let owners: std::collections::BTreeSet<_> = row
+                .members
+                .iter()
+                .map(|p| {
+                    if p.user.is_empty() {
+                        "?"
+                    } else {
+                        p.user.as_str()
+                    }
+                })
+                .collect();
+            lines.push(Line::raw(format!(
+                "Owners: {} · totals include descendant helpers",
+                owners.into_iter().collect::<Vec<_>>().join(", ")
+            )));
             match &row.group {
-                GroupKey::Project { host, user, .. } => {
+                GroupKey::Directory { path } => {
                     lines.push(Line::raw(format!(
-                        "Git host: {} · user {user}",
+                        "Working directory: {}",
+                        cpu::display_path(path)
+                    )));
+                    lines.push(Line::raw(
+                        "No Git project discovered · expand: tool → helpers / PIDs.",
+                    ));
+                }
+                GroupKey::Project { host, .. } => {
+                    lines.push(Line::raw(format!(
+                        "Git host: {}",
                         if host.is_empty() {
                             "local (no network origin)"
                         } else {
@@ -366,25 +405,10 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                         }
                     )));
                     lines.push(Line::raw(
-                        "Working-directory attribution · expand: checkout → application → process.",
+                        "Process working directory · expand: checkout → tool → helpers / PIDs.",
                     ));
                 }
                 GroupKey::Application { .. } => {
-                    let owners: std::collections::BTreeSet<_> = row
-                        .members
-                        .iter()
-                        .map(|p| {
-                            if p.user.is_empty() {
-                                "?"
-                            } else {
-                                p.user.as_str()
-                            }
-                        })
-                        .collect();
-                    lines.push(Line::raw(format!(
-                        "Owners: {}",
-                        owners.into_iter().collect::<Vec<_>>().join(", ")
-                    )));
                     let paths: std::collections::BTreeSet<_> = row
                         .members
                         .iter()

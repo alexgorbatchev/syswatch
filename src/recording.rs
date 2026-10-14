@@ -875,6 +875,49 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_preserves_owning_tools_and_reparented_helper_totals() {
+        use crate::cpu::{groups, GroupMode};
+        std::fs::create_dir_all(".tmp").unwrap();
+        let dir = tempfile::tempdir_in(".tmp").unwrap();
+        let path = dir.path().join("parents.swr");
+        let mut original = snap_at(1);
+        original.cpu.per_core = vec![0.0; 8];
+        original.procs = vec![proc(100, "pi", 8.0), proc(101, "MainThread", 80.0)];
+        for p in &mut original.procs {
+            p.exe = Some("/bin/node".into());
+            p.scope = crate::collect::ProcessScope::Tool;
+        }
+        original.procs[1].ppid = 100;
+        let mut reparented = original.clone();
+        reparented.t += Duration::from_secs(1);
+        reparented.procs[1].ppid = 1;
+        {
+            let mut recorder = Recorder::create(path.clone()).unwrap();
+            recorder.push(&original).unwrap();
+            recorder.push(&reparented).unwrap();
+        }
+        let decoded = read(&path).unwrap();
+        assert_eq!(decoded[0].procs[1].ppid, 100);
+        assert_eq!(decoded[1].procs[1].ppid, 1);
+        let before = groups(&decoded[0], GroupMode::Application);
+        assert_eq!(
+            (
+                before.len(),
+                before[0].label.as_str(),
+                before[0].cpu_pct,
+                before[0].members.len()
+            ),
+            (1, "pi", Some(11.0), 2)
+        );
+        let after = groups(&decoded[1], GroupMode::Application);
+        assert_eq!(after.len(), 2);
+        assert_eq!(
+            after.iter().find(|g| g.label == "pi").unwrap().cpu_pct,
+            Some(1.0)
+        );
+    }
+
+    #[test]
     fn round_trip_preserves_scope_changes_and_historical_cpu_order() {
         use crate::collect::ProcessScope;
         std::fs::create_dir_all(".tmp").unwrap();

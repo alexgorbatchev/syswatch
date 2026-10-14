@@ -5,6 +5,9 @@ use crate::config::SyswatchConfig;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{backend::TestBackend, Terminal};
 
+#[path = "cpu_tests/directories.rs"]
+mod directories;
+
 fn app() -> App {
     let mut app = App::new(TabId::Cpu, SyswatchConfig::default());
     let snap = Snapshot {
@@ -82,11 +85,20 @@ fn expanded_processes_have_a_separate_pid_column() {
         let mut app = app();
         let mut snap = app.snap.take().unwrap();
         snap.procs[0].pid = process_pid;
+        let mut second = snap.procs[0].clone();
+        second.pid = 44;
+        snap.procs.push(second);
         app.history.push(&snap);
         app.snap = Some(snap);
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         let expected_pid = process_pid.to_string();
         let screen = render(&app, width, 35);
+        if width == 140 {
+            assert!(
+                screen.contains("Expand to inspect its processes."),
+                "{screen}"
+            );
+        }
         let lines: Vec<_> = screen.lines().collect();
         let header = lines
             .iter()
@@ -122,42 +134,224 @@ fn expanded_processes_have_a_separate_pid_column() {
 }
 
 #[test]
-fn memory_totals_and_cpu_colors_render_for_groups_and_processes() {
-    for (raw_cpu, text, color) in [
-        (80.0, "10%", p::status_good()),
-        (240.0, "30%", p::status_warn()),
-        (560.0, "70%", p::status_error()),
-    ] {
+fn procs_column_hides_single_process_counts_but_keeps_group_counts() {
+    for width in [60, 80, 140] {
         let mut app = app();
         let mut snap = app.snap.take().unwrap();
-        snap.procs.truncate(1);
-        snap.procs[0].cpu_pct = raw_cpu;
-        snap.procs[0].mem_rss = 512 * 1024 * 1024;
-        app.history.push(&snap);
+        let mut second = snap.procs[0].clone();
+        second.pid = 44;
+        snap.procs.push(second);
         app.snap = Some(snap);
         app.handle_key(KeyEvent::from(KeyCode::Enter));
-        let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
-        terminal
-            .draw(|frame| draw(frame, frame.area(), &app, app.displayed_snap().unwrap()))
+        let screen = render(&app, width, 35);
+        let header = screen
+            .lines()
+            .find(|l| l.contains("Procs") && l.contains("CPU"))
             .unwrap();
-        let buffer = terminal.backend().buffer();
-        let mut matches = 0;
-        for y in 0..35 {
-            let line: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
-            if line.contains("512.0 MB") {
-                assert!(line.contains(text), "{line}");
-                for x in 0..116 {
-                    let value: String = (x..x + text.len() as u16)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect();
-                    if value == text {
-                        assert_eq!(buffer[(x, y)].fg, color);
-                        matches += 1;
+        let start = header[..header.find("Procs").unwrap()].chars().count();
+        let end = header[..header.find("CPU").unwrap()].chars().count();
+        let counts: Vec<_> = screen
+            .lines()
+            .skip_while(|line| *line != header)
+            .skip(1)
+            .take_while(|line| !line.starts_with('└'))
+            .filter(|line| line.contains('%'))
+            .map(|line| {
+                line.chars()
+                    .skip(start)
+                    .take(end - start)
+                    .collect::<String>()
+                    .trim()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(counts, ["2", "", "", ""], "{screen}");
+    }
+}
+
+#[test]
+fn owning_tool_expands_helpers_with_pids_and_explains_ownership_in_both_modes() {
+    for mode in [cpu::GroupMode::Application, cpu::GroupMode::Project] {
+        let mut app = app();
+        let mut snap = app.snap.take().unwrap();
+        snap.procs = vec![snap.procs[1].clone()];
+        snap.procs[0].name = "pi".into();
+        snap.procs[0].cpu_pct = 80.0;
+        let mut helper = snap.procs[0].clone();
+        helper.pid = 44;
+        helper.ppid = 43;
+        helper.name = "MainThread".into();
+        helper.cpu_pct = 160.0;
+        snap.procs.push(helper);
+        app.snap = Some(snap);
+        app.user_config.cpu_group = mode;
+        for _ in 0..5 {
+            let snap = app.displayed_snap().unwrap();
+            let grouped = cpu::groups(snap, mode);
+            let keys: Vec<_> = cpu::rows(snap, mode, &grouped, &app.cpu)
+                .into_iter()
+                .filter(|row| row.process.is_none())
+                .map(|row| row.key)
+                .collect();
+            app.cpu.expanded.extend(keys);
+        }
+        let screen = render(&app, 140, 40);
+        assert!(
+            screen
+                .lines()
+                .any(|l| l.contains("▾") && l.contains("pi") && l.contains("30%")),
+            "{screen}"
+        );
+        assert!(
+            screen
+                .lines()
+                .any(|l| l.contains("node") && l.contains("44") && l.contains("20%")),
+            "{screen}"
+        );
+        assert!(
+            screen.lines().any(|l| !l.contains("▾")
+                && !l.contains("▸")
+                && l.contains("node")
+                && l.contains("20%")),
+            "{screen}"
+        );
+        app.cpu.selected = Some(cpu::RowKey::Process(44, None));
+        let screen = render(&app, 140, 40);
+        assert!(screen.contains("Owning tool: pi · PID 43"), "{screen}");
+    }
+}
+
+#[test]
+fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
+    for width in [80, 140] {
+        let mut app = app();
+        let mut snap = app.snap.take().unwrap();
+        snap.procs.remove(0);
+        snap.procs[0].name = "yazi".into();
+        snap.procs[0].exe = Some("/bin/yazi".into());
+        snap.procs[0].pid = 1161583;
+        app.snap = Some(snap);
+        app.user_config.cpu_group = cpu::GroupMode::Project;
+        let before = render(&app, width, 35);
+        assert!(
+            before.contains("Expand to inspect its processes."),
+            "{before}"
+        );
+        assert!(
+            before
+                .lines()
+                .any(|l| l.contains('▸') && l.contains("acme/web")),
+            "{before}"
+        );
+        assert!(!before.contains("1161583"), "{before}");
+        assert!(!before.contains("acme/web · yazi"), "{before}");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let project = render(&app, width, 35);
+        assert!(
+            project
+                .lines()
+                .any(|l| l.contains('▸') && l.contains("/work/web")),
+            "{project}"
+        );
+        assert!(!project.contains("1161583"), "{project}");
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        let expanded = render(&app, width, 35);
+        let header = expanded
+            .lines()
+            .find(|l| l.contains("Procs") && l.contains("CPU"))
+            .unwrap();
+        let pid_start = header[..header.find("PID").unwrap()].chars().count();
+        let count_start = header[..header.find("Procs").unwrap()].chars().count();
+        let cpu_start = header[..header.find("CPU").unwrap()].chars().count();
+        let table: Vec<_> = expanded
+            .lines()
+            .skip_while(|l| *l != header)
+            .skip(1)
+            .take_while(|l| !l.starts_with('└'))
+            .collect();
+        let processes: Vec<_> = table.iter().filter(|l| l.contains("1161583")).collect();
+        assert_eq!(processes.len(), 1, "{expanded}");
+        let row = processes[0];
+        assert!(row.contains("yazi") && !row.contains("acme/web"), "{row}");
+        assert!(!row.contains('▸') && !row.contains('▾'), "{row}");
+        assert_eq!(
+            row.chars()
+                .skip(pid_start)
+                .take(count_start - pid_start)
+                .collect::<String>()
+                .trim(),
+            "1161583"
+        );
+        assert!(row
+            .chars()
+            .skip(count_start)
+            .take(cpu_start - count_start)
+            .all(|c| c == ' '));
+        assert!(
+            expanded.contains("Working directory: /work/web/src"),
+            "{expanded}"
+        );
+        let expansion = app.cpu.expanded.clone();
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.cpu.expanded, expansion);
+        assert_eq!(app.cpu.selected, Some(cpu::RowKey::Process(1161583, None)));
+        assert_eq!(render(&app, width, 35), expanded);
+        app.handle_key(KeyEvent::from(KeyCode::PageDown));
+        assert!(render(&app, width, 35).contains("github.com/acme/web · /work/web"));
+    }
+}
+
+#[test]
+fn memory_totals_and_cpu_colors_render_for_groups_and_processes() {
+    for (raw_cpu, text, group_text, color) in [
+        (80.0, "10%", "20%", p::status_good()),
+        (240.0, "30%", "60%", p::status_warn()),
+        (560.0, "70%", "140%", p::status_error()),
+    ] {
+        for count in [1, 2] {
+            let mut app = app();
+            let mut snap = app.snap.take().unwrap();
+            snap.procs.truncate(1);
+            snap.procs[0].cpu_pct = raw_cpu;
+            snap.procs[0].mem_rss = 512 * 1024 * 1024;
+            if count == 2 {
+                let mut second = snap.procs[0].clone();
+                second.pid = 44;
+                snap.procs.push(second);
+            }
+            app.history.push(&snap);
+            app.snap = Some(snap);
+            app.handle_key(KeyEvent::from(KeyCode::Enter));
+            let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, frame.area(), &app, app.displayed_snap().unwrap()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let mut matches = 0;
+            for y in 0..35 {
+                let line: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+                if line.contains("512.0 MB") || line.contains("1.0 GB") {
+                    let expected = if line.contains("1.0 GB") {
+                        group_text
+                    } else {
+                        text
+                    };
+                    assert!(line.contains(expected), "{line}");
+                    for x in 0..116 {
+                        let value: String = (x..x + expected.len() as u16)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect();
+                        if value == expected {
+                            assert_eq!(buffer[(x, y)].fg, color);
+                            matches += 1;
+                        }
                     }
                 }
             }
+            assert_eq!(matches, if count == 1 { 1 } else { 3 });
         }
-        assert_eq!(matches, 2);
     }
 }
 
@@ -215,7 +409,7 @@ fn system_rows_are_marked_and_follow_users_even_when_they_use_more_cpu() {
     let screen = render(&app, 140, 40);
     let leaf = screen
         .lines()
-        .find(|l| l.contains("chrome [system]"))
+        .find(|l| l.contains("Google Chrome [system]"))
         .unwrap();
     assert!(leaf.contains("42"), "{screen}");
 }
@@ -308,6 +502,12 @@ fn combined_application_details_show_owners_and_paths_and_can_scroll() {
 #[test]
 fn project_expansion_reveals_checkout_then_application_then_process() {
     let mut app = app();
+    let mut snap = app.snap.take().unwrap();
+    let mut second = snap.procs[1].clone();
+    second.pid = 44;
+    second.cpu_pct = 0.0;
+    snap.procs.push(second);
+    app.snap = Some(snap);
     app.handle_key(KeyEvent::from(KeyCode::Char('b')));
     // Chrome remains first at 30%, project follows at 20%.
     app.handle_key(KeyEvent::from(KeyCode::Down));
@@ -366,7 +566,6 @@ fn tiny_terminal_does_not_panic() {
 fn compact_terminal_shows_selected_process_and_core_pages() {
     let mut app = app();
     app.handle_key(KeyEvent::from(KeyCode::Enter));
-    app.handle_key(KeyEvent::from(KeyCode::Down));
     assert!(render(&app, 80, 19).contains("PID 42 · parent"));
     app.handle_key(KeyEvent::from(KeyCode::Char('c')));
     assert!(render(&app, 80, 19).contains("c0"));
@@ -390,7 +589,7 @@ fn recent_column_uses_more_history_on_wide_terminals() {
     let screen = render(&app, 120, 35);
     let row = screen
         .lines()
-        .find(|line| line.contains("▸") && line.contains("Google Chrome"))
+        .find(|line| line.contains("Google Chrome") && line.contains("42"))
         .unwrap();
     assert!(
         row.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count() >= 28,
@@ -414,7 +613,7 @@ fn deleted_executable_is_muted_and_explained_even_when_selected() {
     let mut found = false;
     for y in 0..35 {
         let line: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
-        if line.contains("▸") && line.contains("(deleted)") {
+        if line.contains("42") && line.contains("(deleted)") {
             for x in 0..111 {
                 let suffix: String = (x..x + 9).map(|x| buffer[(x, y)].symbol()).collect();
                 if suffix == "(deleted)" {
@@ -427,6 +626,5 @@ fn deleted_executable_is_muted_and_explained_even_when_selected() {
     assert!(found);
     assert!(render(&app, 120, 35).contains("unlinked"));
     app.handle_key(KeyEvent::from(KeyCode::Enter));
-    app.handle_key(KeyEvent::from(KeyCode::Down));
     assert!(render(&app, 80, 19).contains("unlinked"));
 }

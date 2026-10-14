@@ -1052,7 +1052,8 @@ impl App {
             (KeyCode::PageUp | KeyCode::PageDown, _) if self.active == TabId::Cpu => {
                 if let Some(snap) = self.displayed_snap() {
                     let groups = crate::cpu::groups(snap, self.user_config.cpu_group);
-                    let rows = crate::cpu::rows(snap, &groups, &self.cpu);
+                    let rows =
+                        crate::cpu::rows(snap, self.user_config.cpu_group, &groups, &self.cpu);
                     let selected = crate::cpu::selected_index(&rows, &self.cpu);
                     let max_scroll =
                         crate::tabs::cpu_detail_line_count(rows.get(selected)).saturating_sub(1);
@@ -1066,7 +1067,8 @@ impl App {
             (KeyCode::Up | KeyCode::Down | KeyCode::Enter, _) if self.active == TabId::Cpu => {
                 if let Some(snap) = self.displayed_snap() {
                     let groups = crate::cpu::groups(snap, self.user_config.cpu_group);
-                    let rows = crate::cpu::rows(snap, &groups, &self.cpu);
+                    let rows =
+                        crate::cpu::rows(snap, self.user_config.cpu_group, &groups, &self.cpu);
                     let selected = crate::cpu::selected_index(&rows, &self.cpu);
                     let index = match k.code {
                         KeyCode::Up => selected.saturating_sub(1),
