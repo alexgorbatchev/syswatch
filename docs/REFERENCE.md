@@ -50,8 +50,10 @@ q / Ctrl-C          →  Quit
 The CPU tab starts with an assessment of CPU activity and available waiting-pressure
 measurements, followed by applications with system-only groups at the bottom.
 Within each section, applications sort into descending 5% CPU bands
-(10–under 15%, 5–under 10%, 0–under 5%, for example), alphabetically within each band.
-Home-directory labels (`~` and `~/…`) sort before other names within the same band.
+(10–under 15%, 5–under 10%, 0–under 5%, for example). Within each band, all
+repository rows come first, sorted alphabetically, including local repositories
+and repositories hosted outside GitHub. Remaining rows sort by name,
+with home-directory labels (`~` and `~/…`) before other names.
 The same ordering applies to directory, checkout, application and process rows when expanded. Chrome
 and its helpers share an application row. `Enter` expands a row and `↑` / `↓`
 selects processes to inspect their command, user and working directory.
@@ -92,7 +94,9 @@ Press `b` to group by project or working directory instead. Attribution follows 
 working directory to its repository and reads `origin` locally, without contacting
 the remote. Network origins group by host and repository; checkout rows distinguish
 worktrees and combine working subdirectories beneath their checkout root.
-Repositories without a network origin remain separate local projects. A known
+Repositories without a network origin combine by repository directory name,
+with separate checkout rows for each path. Network and local identities remain
+separate. A known
 working directory without a discovered repository gets its own directory row.
 Projects and directories combine OS users; details list their owners.
 
@@ -117,7 +121,7 @@ different locations retain their own application rows.
 Claude Code's native `claude/versions/<version>` executables and helpers share a
 `claude` application row; their versioned executable paths remain in details.
 
-Known applications use Nerd Font icons; GitHub projects use the fork icon. Configure
+Known applications use Nerd Font icons; all repositories use the same Git icon. Configure
 your terminal with a [Nerd Font](https://www.nerdfonts.com/) to display these glyphs.
 Names remain visible alongside icons. Chrome tab titles are not collected; use
 Chrome's Task Manager to identify a particular tab or extension.
@@ -147,9 +151,9 @@ expanded cores temporarily occupy the process-detail space. `←` / `→` scrubs
 assessment, groups and trends together. Open Settings with `,` and press `S` to
 persist the grouping preference.
 
-Recordings use format v5 to preserve executable paths, working directories, Git
-attribution and system/tool categories. This version rejects older recording formats;
-older binaries cannot read v5 recordings.
+Recordings use format v6 to preserve executable paths, working directories, Git
+attribution, system/tool categories and Docker container membership. This version
+rejects older recording formats; older binaries cannot read v6 recordings.
 
 ### Dense view
 
@@ -164,7 +168,7 @@ so a heading costs no row.
 rows  0-11  cpu            full-height braille graph · axis · vitals
 rows 12-23  mem  │ net     composition + history │ mirrored down/up
 rows 24-31  cores │ disk   per-core grid │ read/write sparklines
-rows 32-43  procs          detail-in-place + process table
+rows 32-43  procs          detail-in-place + project process tree
 ```
 
 **The mirror means "two directions of one flow."** Only `net` earns one:
@@ -186,6 +190,45 @@ synthesising colours you never chose.
 `1`–`6` zoom a box to the whole frame — the process table at forty rows, or just
 the network mirror — and `esc` restores the grid. Below 100×37 it falls back to a
 three-box compact arrangement rather than cramming.
+
+The process panel uses the CPU tab's project tree: repository → checkout/worktree
+→ owning tool → helpers / PIDs. Known working directories outside Git get their
+own folder row; processes without a known directory fall back to application
+groups. `Enter` expands or collapses the selected group. `↑↓` / `j k`,
+`Home` / `End`, and `PgUp` / `PgDn` navigate the visible tree. Selection and
+expansion persist through zooming and switching views, independently of Full.
+Both process trees show top-level labels without expansion markers. Expanded
+children use `├─` and rounded `╰─` branches, with `│` connecting siblings.
+PID leaves omit the horizontal stroke (`├` / `╰`) to sit one column shallower.
+Folder icons switch to an open folder while expanded.
+When a singleton becomes a group, selection follows its PID into the group;
+when the selected process exits, selection moves to a nearby surviving row.
+
+On Linux, Docker workloads override directory/project grouping and appear under
+Docker → container ID → PIDs. Container rows stay expandable even with one PID.
+Membership comes from host cgroups or Docker's `moby` containerd shims, without
+querying a Docker socket. Container names are shown as short IDs; details retain
+the full ID. Docker's daemon, CLI and proxy processes share the Docker root;
+unrelated containerd workloads remain separate. Attribution depends on readable
+host process metadata; containers inside a Docker Desktop VM are not exposed as
+individual host PIDs by this collector.
+
+Rows show aggregate process count, PID for individual processes, CPU as an
+integer percentage of the whole machine, resident memory, and dotted CPU history
+for top-level groups. Counts of one are blank. System-only groups sort last;
+within each section, rows sort by descending 5% CPU buckets and then name.
+Within each CPU bucket, all repositories come first, sorted by name; the
+remaining rows follow, with `~` paths before other names. Container IDs and
+`[system]` badges use dim gray text, lighter on the selected row for contrast.
+First-column labels are gray below 10% CPU, normal foreground (white on dark
+themes) from 10% to below 30%, and red at 30% and above. Group labels use their
+aggregate CPU; individual PID labels use their own CPU. Container IDs and
+`[system]` badges remain gray at every CPU level.
+The numeric CPU column reaches the warning colour at 30% and the critical colour
+at 70%, matching the CPU tab. Memory below 1 GB (1024³ bytes) uses neutral gray text, with a
+lighter gray for selection contrast; larger values retain the memory color.
+The two detail rows show owners and executable paths for groups,
+or parent PID, user, working directory and command for individual processes.
 
 Every number is measured over the window you can actually see, so a printed peak
 is never one hiding in scrolled-off history. Graphs hold one sample per column

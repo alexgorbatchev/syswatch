@@ -28,9 +28,10 @@ fn known_directory_expands_into_apps_and_pids_with_totals_and_details() {
     assert!(before.contains("~/syswatch-directory-fixture"), "{before}");
     assert!(before.contains("No Git project discovered"), "{before}");
     assert!(!before.contains(path), "{before}");
+    assert!(before.contains('\u{f07b}'), "{before}");
     let directory = before
         .lines()
-        .find(|l| l.contains('▸') && l.contains("~/syswatch-directory-fixture"))
+        .find(|l| l.contains("~/syswatch-directory-fixture") && l.contains("896.0 MB"))
         .unwrap();
     assert!(
         directory.contains("50%") && directory.contains("896.0 MB"),
@@ -38,9 +39,10 @@ fn known_directory_expands_into_apps_and_pids_with_totals_and_details() {
     );
     app.handle_key(KeyEvent::from(KeyCode::Enter));
     let apps = render(&app, 140, 40);
+    assert!(apps.contains('\u{f07c}'), "{apps}");
     assert!(
         apps.lines()
-            .any(|l| l.contains('▸') && l.contains("node") && l.contains("640.0 MB")),
+            .any(|l| l.contains("├─") && l.contains("node") && l.contains("640.0 MB")),
         "{apps}"
     );
     assert!(

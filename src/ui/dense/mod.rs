@@ -44,16 +44,20 @@
 //! learned.
 
 pub mod paint;
+mod processes;
+
+#[cfg(test)]
+mod tree_tests;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, History};
-use crate::collect::{ProcTick, Snapshot};
+use crate::collect::Snapshot;
 use crate::ui::scroll::ScrollWindow;
 use crate::ui::theme::{self, Theme};
 use crate::ui::widgets::human_bytes;
@@ -103,13 +107,11 @@ const AX_GRAPH: u16 = AX_TICK + 2;
 /// views move the other view's selection.
 #[derive(Debug, Clone, Default)]
 pub struct DenseState {
-    /// Last known row index — the fallback when the selected process exits.
-    pub selected: usize,
-    /// The process the cursor is actually on. The table re-sorts every tick,
-    /// so an index alone slides the cursor onto a *different* process
-    /// underneath the user; the detail block then flickers between processes
-    /// nobody asked for.
-    pub selected_pid: Option<u32>,
+    /// Project-tree selection and expansion, independent of Full's tree.
+    pub tree: crate::cpu::CpuState,
+    /// Previous visible order and selected membership for process-list churn.
+    pub(crate) previous_rows: Vec<crate::cpu::RowKey>,
+    pub(crate) selected_members: Vec<crate::cpu::RowKey>,
     /// The process table's scroll window, moved by the renderer to follow
     /// the selection.
     pub scroll: ScrollWindow,
@@ -122,8 +124,6 @@ pub struct DenseState {
     /// visible window, and `render` takes `&App`. See [`ease_ceiling`].
     net_ceiling: Cell<u64>,
     io_ceiling: Cell<u64>,
-    /// The order the rows were last drawn in, by pid. See [`sorted_procs`].
-    order: RefCell<Vec<u32>>,
 }
 
 /// Move a graph's ceiling toward `target`, rising at once and falling slowly.
@@ -148,75 +148,6 @@ fn ease_ceiling(slot: &Cell<u64>, target: u64) -> u64 {
     };
     slot.set(next);
     next
-}
-
-/// The process table in the order it is drawn.
-///
-/// Sorted on the **smoothed** CPU figure, not the instantaneous one. Raw
-/// `cpu_pct` puts six processes within a percent of each other and they trade
-/// places every single tick — the table reads as a slot machine. The EWMA
-/// (alpha 0.3, ~5 ticks) is already maintained for the runaway-process
-/// heuristic and is exactly the right key here. The *displayed* number stays
-/// instantaneous and truthful; only the ordering is damped.
-///
-/// PID breaks ties so the order is total, and equal-load processes cannot
-/// swap on a whim.
-pub fn sorted_procs<'a>(snap: &'a Snapshot, h: &History, st: &DenseState) -> Vec<&'a ProcTick> {
-    let prev: std::collections::HashMap<u32, usize> = st
-        .order
-        .borrow()
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (*p, i))
-        .collect();
-    let key = |p: &ProcTick| h.proc_cpu_ewma.get(&p.pid).copied().unwrap_or(p.cpu_pct);
-    let rank = |pid: u32| prev.get(&pid).copied().unwrap_or(usize::MAX);
-
-    let mut v: Vec<&ProcTick> = snap.procs.iter().collect();
-    v.sort_by(|a, b| {
-        band(key(b))
-            .cmp(&band(key(a)))
-            .then_with(|| rank(a.pid).cmp(&rank(b.pid)))
-            .then_with(|| a.pid.cmp(&b.pid))
-    });
-    *st.order.borrow_mut() = v.iter().map(|p| p.pid).collect();
-    v
-}
-
-/// The load band a process sorts into.
-///
-/// Ordering on a smoothed *value* still flips every time two processes cross,
-/// and on a busy machine half a dozen of them sit permanently within noise of
-/// each other — so the table trades places every tick and reads as a slot
-/// machine. Banding makes the comparison coarse: inside a band the previous
-/// order simply stands, and a row only overtakes another when its load
-/// genuinely separates.
-///
-/// Two percentage points. Wide enough that jitter never crosses it, narrow
-/// enough that a real change in load still reorders the table promptly. The
-/// long idle tail all lands in band 0 and stops moving altogether.
-///
-/// Note this is a *total, transitive* order — bands, then previous rank, then
-/// pid. A comparator that returned "equal if within tolerance" would not be,
-/// and `sort_by` gives unspecified results for those.
-fn band(pct: f32) -> i32 {
-    (pct.max(0.0) / 2.0) as i32
-}
-
-/// Which row the cursor is on, resolved by PID against the current order.
-/// Falls back to the last index when that process has exited.
-pub fn selected_index_by_pid(pid: Option<u32>, fallback: usize, pids: &[u32]) -> usize {
-    if pids.is_empty() {
-        return 0;
-    }
-    pid.and_then(|want| pids.iter().position(|p| *p == want))
-        .unwrap_or_else(|| fallback.min(pids.len() - 1))
-}
-
-/// [`selected_index_by_pid`] against the rows themselves.
-pub fn selected_index(state: &DenseState, procs: &[&ProcTick]) -> usize {
-    let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
-    selected_index_by_pid(state.selected_pid, state.selected, &pids)
 }
 
 // ── layout ──────────────────────────────────────────────────────────────────
@@ -499,7 +430,7 @@ pub fn render(f: &mut Frame, app: &App, snap: &Snapshot) {
             io_box(buf, l.mem, &t, &ramps, app, snap);
         }
     }
-    procs_box(buf, l.procs, &t, &ramps, app, snap, &l);
+    processes::draw(buf, &l, &t, &ramps, app, snap);
 }
 
 // ── box 1: cpu ──────────────────────────────────────────────────────────────
@@ -1424,453 +1355,6 @@ fn io_box(buf: &mut Buffer, area: Rect, t: &Theme, r: &Ramps, app: &App, snap: &
 
 // ── box 6: procs ────────────────────────────────────────────────────────────
 
-/// Column plan for the process table, computed from the interior width.
-///
-/// Fields are dropped from the least load-bearing end as the terminal narrows,
-/// and the history sparkline takes whatever is left — so the table degrades by
-/// losing columns rather than by letting two of them share a range.
-struct ProcCols {
-    name: u16,
-    pid: Option<u16>,
-    user: Option<u16>,
-    cpu: u16,
-    mem: u16,
-    thr: Option<u16>,
-    state: Option<u16>,
-    io: Option<u16>,
-    spark_x: u16,
-    spark_w: u16,
-}
-
-impl ProcCols {
-    fn new(inner: Rect) -> Self {
-        // One column of air after the row marker, or `▶` butts the name.
-        let x0 = inner.x + 3;
-        let mut x = x0 + 15; // name
-        let w = inner.width;
-        let pid = (w >= 60).then(|| {
-            let c = x;
-            x += 7;
-            c
-        });
-        let user = (w >= 74).then(|| {
-            let c = x;
-            x += 10;
-            c
-        });
-        let cpu = x;
-        x += 8;
-        let mem = x;
-        x += 9;
-        let thr = (w >= 88).then(|| {
-            let c = x;
-            x += 6;
-            c
-        });
-        let state = (w >= 94).then(|| {
-            let c = x;
-            x += 4;
-            c
-        });
-        let io = (w >= 112).then(|| {
-            let c = x;
-            x += 14;
-            c
-        });
-        let spark_x = x + 1;
-        let spark_w = inner.right().saturating_sub(spark_x + 1).min(28);
-        Self {
-            name: x0,
-            pid,
-            user,
-            cpu,
-            mem,
-            thr,
-            state,
-            io,
-            spark_x,
-            spark_w,
-        }
-    }
-}
-
-/// The muted token to use for a row, given whether that row is selected.
-///
-/// A selection tint and the muted text colour can be the *same* colour: on the
-/// `terminal` theme `selection_bg` is `Indexed(8)` and `text_muted` is
-/// `DarkGray`, which every terminal renders identically — so every dim field
-/// on the selected row vanishes. Lift dim text one rung wherever it sits on
-/// the tint. Harmless on themes where the two already differ.
-fn muted_on(sel: bool, t: &Theme) -> Color {
-    if sel {
-        t.text_secondary
-    } else {
-        t.text_muted
-    }
-}
-
-fn procs_box(
-    buf: &mut Buffer,
-    area: Rect,
-    t: &Theme,
-    r: &Ramps,
-    app: &App,
-    snap: &Snapshot,
-    l: &Layout,
-) {
-    // The border claims a sort, so sort here rather than trusting the
-    // collector's order.
-    let procs = sorted_procs(snap, &app.history, &app.dense);
-    let visible = l.visible_procs().max(1);
-    let sel = selected_index(&app.dense, &procs);
-    let first = app.dense.scroll.follow(sel, procs.len(), visible);
-    let shown: Vec<&&ProcTick> = procs.iter().skip(first).take(visible).collect();
-
-    let sub = format!("{}", procs.len());
-    let range = format!("{}-{} of {}", first + 1, first + shown.len(), procs.len());
-    let binds: &[Bind] = &[
-        ("q", "uit"),
-        ("↑↓", " select"),
-        ("V", " view"),
-        (",", " menu"),
-        if l.zoom.is_some() {
-            ("esc", " back")
-        } else {
-            ("1-6", " zoom")
-        },
-        ("?", " keys"),
-    ];
-    let inner = paint::panel(
-        buf,
-        area,
-        t,
-        &PanelOpts {
-            // Compact shows three boxes, so procs is the third — the bracketed
-            // hotkeys have to match what is actually on screen.
-            key: Some(if l.shape == Shape::Compact { "3" } else { "6" }),
-            title: Some("procs"),
-            sub: Some(&sub),
-            right: Some("sort ↓ cpu"),
-            foot_left: binds,
-            foot_right: Some(&range),
-            ..Default::default()
-        },
-    );
-    if inner.height < 2 || inner.width < 40 {
-        return;
-    }
-    let cols = ProcCols::new(inner);
-
-    // Detail-in-place: the selected row's detail is hoisted into the top of
-    // this same box. No new screen, no back button.
-    let mut y = inner.y;
-    if inner.height >= 4 {
-        if let Some(p) = procs.get(sel) {
-            detail_rows(buf, inner, y, t, r, app, p, &cols);
-            y += 2;
-        }
-    }
-
-    // header
-    let hs = Style::default().fg(t.border);
-    paint::put(buf, cols.name, y, "PROCESS", hs);
-    if let Some(x) = cols.pid {
-        paint::put_right(buf, x + 5, y, "PID", hs);
-    }
-    if let Some(x) = cols.user {
-        paint::put(buf, x, y, "USER", hs);
-    }
-    paint::put_right(
-        buf,
-        cols.cpu + 5,
-        y,
-        "CPU%",
-        Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
-    );
-    paint::put_right(buf, cols.mem + 6, y, "MEM", hs);
-    if let Some(x) = cols.thr {
-        paint::put_right(buf, x + 3, y, "THR", hs);
-    }
-    if let Some(x) = cols.state {
-        paint::put(buf, x, y, "ST", hs);
-    }
-    if let Some(x) = cols.io {
-        paint::put_right(buf, x + 11, y, "IO R/W", hs);
-    }
-    if cols.spark_w >= 6 {
-        paint::put(buf, cols.spark_x, y, "60s", hs);
-    }
-    y += 1;
-
-    for (i, p) in shown.iter().enumerate() {
-        let row_y = y + i as u16;
-        if row_y >= inner.bottom() {
-            break;
-        }
-        let is_sel = first + i == sel;
-        if is_sel {
-            for x in inner.x..inner.right() {
-                if let Some(cell) = buf.cell_mut((x, row_y)) {
-                    cell.set_bg(t.selection_bg);
-                }
-            }
-        }
-        let idle = p.cpu_pct < 2.0;
-        let busy = p.cpu_pct > 50.0;
-        paint::put(
-            buf,
-            inner.x + 1,
-            row_y,
-            if is_sel { "▶" } else { "●" },
-            Style::default().fg(if is_sel {
-                t.brand
-            } else if idle {
-                t.border
-            } else if busy {
-                t.status_warn
-            } else {
-                t.status_good
-            }),
-        );
-        paint::put(
-            buf,
-            cols.name,
-            row_y,
-            &truncate(&p.name, 14),
-            Style::default().fg(if idle {
-                muted_on(is_sel, t)
-            } else {
-                t.text_primary
-            }),
-        );
-        if let Some(x) = cols.pid {
-            paint::put_right(
-                buf,
-                x + 5,
-                row_y,
-                &p.pid.to_string(),
-                Style::default().fg(muted_on(is_sel, t)),
-            );
-        }
-        if let Some(x) = cols.user {
-            paint::put(
-                buf,
-                x,
-                row_y,
-                &truncate(&p.user, 8),
-                Style::default().fg(muted_on(is_sel, t)),
-            );
-        }
-        paint::put_right(
-            buf,
-            cols.cpu + 5,
-            row_y,
-            &format!("{:.1}", p.cpu_pct),
-            Style::default().fg(if busy {
-                t.status_warn
-            } else if idle {
-                muted_on(is_sel, t)
-            } else {
-                t.status_good
-            }),
-        );
-        paint::put_right(
-            buf,
-            cols.mem + 6,
-            row_y,
-            &human_bytes(p.mem_rss),
-            // Memory reads in the secondary accent, matching the mem box's own
-            // graph. `tx_rate` is netwatch's magenta upload token and has no
-            // business colouring RSS.
-            Style::default().fg(r.secondary.mid()),
-        );
-        if let Some(x) = cols.thr {
-            paint::put_right(
-                buf,
-                x + 3,
-                row_y,
-                &p.threads.map(|n| n.to_string()).unwrap_or("--".into()),
-                Style::default().fg(muted_on(is_sel, t)),
-            );
-        }
-        if let Some(x) = cols.state {
-            paint::put(
-                buf,
-                x,
-                row_y,
-                &p.state.to_string(),
-                Style::default().fg(match p.state {
-                    'R' => t.status_good,
-                    'D' => t.status_error,
-                    _ => muted_on(is_sel, t),
-                }),
-            );
-        }
-        if let Some(x) = cols.io {
-            paint::put_right(
-                buf,
-                x + 11,
-                row_y,
-                &format!(
-                    "{}/{}",
-                    rate_short(p.io_read_rate as u64),
-                    rate_short(p.io_write_rate as u64)
-                ),
-                Style::default().fg(muted_on(is_sel, t)),
-            );
-        }
-        if cols.spark_w >= 6 {
-            match app.history.proc_cpu_history.get(&p.pid) {
-                Some(ring) if ring.len() > 1 => {
-                    let vals: Vec<u64> = ring.iter().map(|&v| paint::perceptual(v, 64)).collect();
-                    let s = Series::fixed(vals, cols.spark_w, 64);
-                    paint::spark(
-                        buf,
-                        cols.spark_x,
-                        row_y,
-                        cols.spark_w,
-                        &s.plot(),
-                        s.max,
-                        &r.primary,
-                    );
-                }
-                _ => paint::baseline(buf, cols.spark_x, row_y, cols.spark_w, r.dim.mid()),
-            }
-        }
-    }
-}
-
-/// The two-row detail block. Fields are laid out left-to-right with a fixed
-/// gutter and measured against the right-hand note before anything is drawn,
-/// so a long process name can never collide with the field after it.
-#[allow(clippy::too_many_arguments)]
-fn detail_rows(
-    buf: &mut Buffer,
-    inner: Rect,
-    y: u16,
-    t: &Theme,
-    r: &Ramps,
-    app: &App,
-    p: &ProcTick,
-    cols: &ProcCols,
-) {
-    // **No tint here.** Exactly one thing in this box is highlighted: the
-    // active process row. Tinting the detail block as well put a second filled
-    // band above the column header, so the header read as highlighted chrome
-    // sitting between two selections. The `↳` in the accent colour is what
-    // binds this block to the row it describes.
-    paint::put(buf, inner.x + 1, y, "↳", Style::default().fg(t.brand));
-
-    let note = format!("nice --  {} threads", p.threads.unwrap_or(0));
-    let segs: Vec<(String, Style)> = vec![
-        (
-            truncate(&p.name, 14),
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        (format!("pid {}", p.pid), Style::default().fg(t.text_muted)),
-        (
-            format!("ppid {}", p.ppid),
-            Style::default().fg(t.text_muted),
-        ),
-        (
-            format!("state {}", p.state),
-            Style::default().fg(if p.state == 'D' {
-                t.status_error
-            } else {
-                t.status_good
-            }),
-        ),
-        (
-            format!("rss {}", human_bytes(p.mem_rss)),
-            Style::default().fg(r.secondary.mid()),
-        ),
-        (
-            format!("virt {}", human_bytes(p.mem_virt)),
-            Style::default().fg(t.text_muted),
-        ),
-    ];
-    row_with_note(buf, inner, y, inner.x + 3, &segs, &note, t);
-
-    // The selection's own cpu strip sits in the SAME column as the table's
-    // `60s` field directly below it, so the detail block reads as the selected
-    // row pulled up rather than as a second, differently-shaped thing. The
-    // command line takes the width left over to its left.
-    let y2 = y + 1;
-    if y2 >= inner.bottom() {
-        return;
-    }
-    paint::put(
-        buf,
-        inner.x + 3,
-        y2,
-        "cpu",
-        Style::default().fg(t.text_muted),
-    );
-    if cols.spark_w >= 4 {
-        match app.history.proc_cpu_history.get(&p.pid) {
-            Some(ring) if ring.len() > 1 => {
-                let vals: Vec<u64> = ring.iter().map(|&v| paint::perceptual(v, 64)).collect();
-                let s = Series::fixed(vals, cols.spark_w, 64);
-                paint::spark(
-                    buf,
-                    cols.spark_x,
-                    y2,
-                    cols.spark_w,
-                    &s.plot(),
-                    s.max,
-                    &r.primary,
-                );
-            }
-            _ => paint::baseline(buf, cols.spark_x, y2, cols.spark_w, r.dim.mid()),
-        }
-    }
-    let room = cols.spark_x.saturating_sub(inner.x + 9) as usize;
-    if room > 4 && !p.cmd.is_empty() {
-        paint::put(
-            buf,
-            inner.x + 7,
-            y2,
-            &truncate(&short_cmd(&p.cmd), room),
-            Style::default().fg(t.text_muted),
-        );
-    }
-}
-
-/// Lay `segs` left-to-right with a two-column gutter, then right-align `note`.
-/// The two runs are measured against each other before drawing: segments that
-/// would collide with the note are dropped, so the row degrades by showing
-/// fewer fields rather than by overwriting one with another.
-fn row_with_note(
-    buf: &mut Buffer,
-    inner: Rect,
-    y: u16,
-    x0: u16,
-    segs: &[(String, Style)],
-    note: &str,
-    t: &Theme,
-) {
-    let note_w = note.width() as u16;
-    let budget = inner.right().saturating_sub(1).saturating_sub(note_w + 2);
-    let mut x = x0;
-    for (s, style) in segs {
-        let w = s.width() as u16;
-        if x + w > budget {
-            break;
-        }
-        paint::put(buf, x, y, s, *style);
-        x += w + 2;
-    }
-    paint::put_right(
-        buf,
-        inner.right() - 2,
-        y,
-        note,
-        Style::default().fg(t.text_muted),
-    );
-}
-
 // ── small helpers ───────────────────────────────────────────────────────────
 
 /// A right-aligned axis label plus its tick, both anchored on the shared
@@ -2006,7 +1490,7 @@ mod tests {
     use super::*;
     use crate::app::TabId;
     use crate::app::ViewMode;
-    use crate::collect::MemTick;
+    use crate::collect::{MemTick, ProcTick};
     use crate::config::SyswatchConfig;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -2394,129 +1878,6 @@ mod tests {
                 _ => false,
             },
         }
-    }
-
-    /// The table must not read as a slot machine.
-    ///
-    /// On a busy machine half a dozen processes sit permanently within noise of
-    /// each other; sorting on the raw per-tick CPU figure makes them trade
-    /// places every single second. Measured here against the same input, so the
-    /// comparison is real rather than two different live captures.
-    #[test]
-    fn banded_order_is_far_stabler_than_raw_cpu_sort() {
-        let base = [40.0f32, 12.0, 11.6, 11.2, 10.8, 10.4, 10.0, 5.0];
-        let mut h = History::new(64);
-        let st = DenseState::default();
-        let mut seed = 12345u64;
-        let mut rnd = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((seed >> 33) as f32 / (u32::MAX >> 1) as f32) * 2.0 - 1.0
-        };
-        let (mut raw_moves, mut banded_moves) = (0usize, 0usize);
-        let (mut prev_raw, mut prev_banded): (Vec<u32>, Vec<u32>) = (vec![], vec![]);
-        for _ in 0..60 {
-            let mut sn = Snapshot::default();
-            sn.procs = base
-                .iter()
-                .enumerate()
-                .map(|(i, &b)| ProcTick {
-                    pid: 100 + i as u32,
-                    name: format!("p{i}"),
-                    cpu_pct: (b + rnd() * 2.0).max(0.0),
-                    ..Default::default()
-                })
-                .collect();
-            h.push(&sn);
-            let mut raw: Vec<&ProcTick> = sn.procs.iter().collect();
-            raw.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap());
-            let raw_ids: Vec<u32> = raw.iter().map(|p| p.pid).collect();
-            let banded_ids: Vec<u32> = sorted_procs(&sn, &h, &st).iter().map(|p| p.pid).collect();
-            if !prev_raw.is_empty() {
-                raw_moves += prev_raw
-                    .iter()
-                    .zip(&raw_ids)
-                    .filter(|(a, b)| a != b)
-                    .count();
-                banded_moves += prev_banded
-                    .iter()
-                    .zip(&banded_ids)
-                    .filter(|(a, b)| a != b)
-                    .count();
-            }
-            prev_raw = raw_ids;
-            prev_banded = banded_ids;
-        }
-        assert!(
-            banded_moves * 4 < raw_moves,
-            "banded {banded_moves} vs raw {raw_moves} — hysteresis is not earning its keep"
-        );
-    }
-
-    /// Stability must not become stickiness: a process that genuinely takes off
-    /// has to reach the top promptly.
-    #[test]
-    fn a_real_load_change_still_reorders_the_table() {
-        let mut h = History::new(64);
-        let st = DenseState::default();
-        let mk = |busy: f32| {
-            let mut sn = Snapshot::default();
-            sn.procs = (0..5)
-                .map(|i| ProcTick {
-                    pid: 100 + i,
-                    name: format!("p{i}"),
-                    cpu_pct: if i == 4 { busy } else { 10.0 },
-                    ..Default::default()
-                })
-                .collect();
-            sn
-        };
-        for _ in 0..10 {
-            let sn = mk(1.0);
-            h.push(&sn);
-            sorted_procs(&sn, &h, &st);
-        }
-        assert_ne!(sorted_procs(&mk(1.0), &h, &st)[0].pid, 104, "idle proc led");
-        // Now it goes hot.
-        for _ in 0..6 {
-            let sn = mk(95.0);
-            h.push(&sn);
-            sorted_procs(&sn, &h, &st);
-        }
-        let sn = mk(95.0);
-        assert_eq!(
-            sorted_procs(&sn, &h, &st)[0].pid,
-            104,
-            "a process at 95% must lead the table"
-        );
-    }
-
-    /// The cursor follows the *process*, not the row number.
-    #[test]
-    fn selection_sticks_to_its_process_when_rows_reorder() {
-        let a = ProcTick {
-            pid: 1,
-            cpu_pct: 50.0,
-            ..Default::default()
-        };
-        let b = ProcTick {
-            pid: 2,
-            cpu_pct: 40.0,
-            ..Default::default()
-        };
-        let before = [&a, &b];
-        let after = [&b, &a]; // they swapped
-        let mut st = DenseState::default();
-        st.selected = 1;
-        st.selected_pid = Some(2);
-        assert_eq!(selected_index(&st, &before), 1);
-        assert_eq!(
-            selected_index(&st, &after),
-            0,
-            "cursor should have followed pid 2 to its new row"
-        );
-        // A process that exits falls back to the remembered row.
-        st.selected_pid = Some(999);
-        assert_eq!(selected_index(&st, &after), 1);
     }
 
     /// Ceilings rise at once and fall slowly. A ceiling taken straight from the

@@ -231,6 +231,10 @@ pub struct ProcTick {
     pub cwd: Option<String>,
     #[serde(default)]
     pub project: Option<ProjectIdentity>,
+    /// Docker container ID from host cgroups or a Docker containerd shim.
+    /// Retained in snapshots so grouping needs no live /proc access on replay.
+    #[serde(default)]
+    pub docker_container: Option<String>,
     pub cpu_pct: f32,
     pub mem_rss: u64,
     pub mem_virt: u64,

@@ -86,6 +86,7 @@ pub fn scrub_snapshot(snap: &mut Snapshot) {
         scrub(&mut p.cmd);
         scrub_opt(&mut p.exe);
         scrub_opt(&mut p.cwd);
+        scrub_opt(&mut p.docker_container);
         if let Some(project) = &mut p.project {
             scrub(&mut project.host);
             scrub(&mut project.repo);
@@ -194,6 +195,7 @@ mod tests {
                 cmd: evil.into(),
                 exe: Some(evil.into()),
                 cwd: Some(evil.into()),
+                docker_container: Some(evil.into()),
                 project: Some(crate::collect::ProjectIdentity {
                     host: evil.into(),
                     repo: evil.into(),

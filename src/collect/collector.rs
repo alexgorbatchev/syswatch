@@ -533,6 +533,7 @@ impl Collector {
                 exe: p.exe().and_then(|path| path.to_str()).map(str::to_owned),
                 cwd: p.cwd().and_then(|path| path.to_str()).map(str::to_owned),
                 project: p.cwd().and_then(|cwd| self.projects.resolve(cwd, now)),
+                docker_container: super::containers::docker_container(pid_u, p.exe(), p.cmd()),
                 mem_rss: p.memory(),
                 mem_virt: p.virtual_memory(),
                 threads,

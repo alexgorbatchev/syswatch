@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use crate::collect::{ProcTick, ProcessScope, Snapshot};
 
+mod docker;
 mod icons;
 mod location;
 mod ownership;
@@ -36,6 +37,7 @@ impl GroupMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GroupKey {
+    Docker,
     Application { identity: String },
     Directory { path: String },
     Project { host: String, repo: String },
@@ -51,7 +53,12 @@ pub struct CpuGroup<'a> {
 
 /// Unknown or mixed membership must never move a group into the system section.
 pub fn system_only(procs: &[&ProcTick]) -> bool {
-    !procs.is_empty() && procs.iter().all(|p| p.scope == ProcessScope::System)
+    !procs.is_empty()
+        && procs.iter().all(|p| {
+            p.scope == ProcessScope::System
+                && p.docker_container.is_none()
+                && !docker::infrastructure(p)
+        })
 }
 
 /// Compute each history point once on ingestion, not once per row/frame.
@@ -167,13 +174,18 @@ fn group_processes<'a>(
     let mut grouped = BTreeMap::new();
     for process in procs {
         let owner = ownership.owner(process);
-        let (key, label, icon) =
-            if let Some(location) = location::of(process).filter(|_| mode == GroupMode::Project) {
-                location.group()
-            } else {
-                let (identity, label, icon) = application(owner);
-                (GroupKey::Application { identity }, label, icon)
-            };
+        let (key, label, icon) = if process.docker_container.is_some()
+            || docker::infrastructure(process)
+            || docker::infrastructure(owner)
+        {
+            (GroupKey::Docker, "Docker".into(), '\u{e7b0}')
+        } else if let Some(location) = location::of(process).filter(|_| mode == GroupMode::Project)
+        {
+            location.group()
+        } else {
+            let (identity, label, icon) = application(owner);
+            (GroupKey::Application { identity }, label, icon)
+        };
         let group = grouped.entry(key.clone()).or_insert_with(|| CpuGroup {
             key,
             label,
@@ -213,17 +225,31 @@ fn group_processes<'a>(
     groups.sort_by(|a, b| {
         system_only(&a.members)
             .cmp(&system_only(&b.members))
-            .then_with(|| usage_order(a.cpu_pct, &a.label, b.cpu_pct, &b.label))
+            .then_with(|| cpu_band(b.cpu_pct).total_cmp(&cpu_band(a.cpu_pct)))
+            .then_with(|| {
+                matches!(b.key, GroupKey::Project { .. })
+                    .cmp(&matches!(a.key, GroupKey::Project { .. }))
+            })
+            .then_with(|| name_order(&a.label, &b.label))
             .then(a.key.cmp(&b.key))
     });
     groups
 }
 
 fn usage_order(a: Option<f32>, a_name: &str, b: Option<f32>, b_name: &str) -> std::cmp::Ordering {
-    let band = |pct: Option<f32>| (pct.unwrap_or(0.0).max(0.0) / 5.0).floor();
-    band(b)
-        .total_cmp(&band(a))
-        .then_with(|| b_name.starts_with('~').cmp(&a_name.starts_with('~')))
+    cpu_band(b)
+        .total_cmp(&cpu_band(a))
+        .then_with(|| name_order(a_name, b_name))
+}
+
+fn cpu_band(pct: Option<f32>) -> f32 {
+    (pct.unwrap_or(0.0).max(0.0) / 5.0).floor()
+}
+
+fn name_order(a_name: &str, b_name: &str) -> std::cmp::Ordering {
+    b_name
+        .starts_with('~')
+        .cmp(&a_name.starts_with('~'))
         .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
         .then_with(|| a_name.cmp(b_name))
 }
@@ -252,6 +278,7 @@ pub fn assessment(snap: &Snapshot) -> &'static str {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RowKey {
+    Container(String),
     Group(GroupKey),
     Directory(GroupKey, String),
     Application(Box<RowKey>, GroupKey),
@@ -259,7 +286,7 @@ pub enum RowKey {
     Process(u32, Option<SystemTime>),
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CpuState {
     pub selected: Option<RowKey>,
     pub expanded: HashSet<RowKey>,
@@ -326,7 +353,9 @@ pub fn rows<'a>(
         if !expandable || !state.expanded.contains(&key) {
             continue;
         }
-        if matches!(group.key, GroupKey::Project { .. }) {
+        if matches!(group.key, GroupKey::Docker) {
+            docker::append(&mut rows, snap, group, state, &ownership);
+        } else if matches!(group.key, GroupKey::Project { .. }) {
             let mut directories: BTreeMap<&str, Vec<&ProcTick>> = BTreeMap::new();
             for p in &group.members {
                 if let Some(project) = &p.project {

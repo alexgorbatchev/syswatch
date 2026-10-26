@@ -1,5 +1,6 @@
 pub mod collector;
 pub mod command;
+mod containers;
 #[cfg(target_os = "macos")]
 pub mod disk_macos;
 pub mod gpu;

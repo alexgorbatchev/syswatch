@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame,
@@ -198,27 +198,21 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
     let trend_width = (inner.width as usize / 4)
         .clamp(8, 48)
         .min((inner.width as usize).saturating_sub(reserved_width));
-    let table_rows = rows.iter().map(|row| {
-        let expanded = app.cpu.expanded.contains(&row.key);
-        let marker = if row.process.is_some() {
-            " "
-        } else if expanded {
-            "▾"
-        } else {
-            "▸"
-        };
+    let prefixes = crate::ui::tree::prefixes(rows);
+    let table_rows = rows.iter().zip(prefixes).map(|(row, prefix)| {
         let name = format!(
-            "{}{} {} {}",
-            "  ".repeat(row.depth),
-            marker,
-            row.icon,
+            "{}{} {}",
+            prefix,
+            crate::ui::tree::icon(row, app.cpu.expanded.contains(&row.key)),
             row.label
         );
         let mut name = muted_deleted(name);
         if cpu::system_only(&row.members) {
             name.spans.push(Span::styled(
                 " [system]",
-                Style::default().fg(p::text_muted()),
+                Style::default()
+                    .fg(p::text_muted())
+                    .add_modifier(Modifier::DIM),
             ));
         }
         let trend = if row.depth == 0 && row.cpu_pct.is_some() {
@@ -395,6 +389,14 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                 owners.into_iter().collect::<Vec<_>>().join(", ")
             )));
             match &row.group {
+                GroupKey::Docker => {
+                    lines.push(Line::raw(
+                        "Docker → containers → PIDs · overrides directory grouping",
+                    ));
+                    if let cpu::RowKey::Container(id) = &row.key {
+                        lines.push(Line::raw(format!("Container ID: {id}")));
+                    }
+                }
                 GroupKey::Directory { path } => {
                     lines.push(Line::raw(format!(
                         "Working directory: {}",

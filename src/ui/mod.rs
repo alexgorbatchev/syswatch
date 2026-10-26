@@ -7,4 +7,5 @@ pub mod palette;
 pub mod scroll;
 pub mod settings;
 pub mod theme;
+pub(crate) mod tree;
 pub mod widgets;

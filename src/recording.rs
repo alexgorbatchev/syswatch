@@ -5,7 +5,7 @@
 //! again (or quitting) flushes and closes. The file is then replayable
 //! via `syswatch --replay path/to/session.swr`.
 //!
-//! ## Format (v5)
+//! ## Format (v6)
 //!
 //! A 6-byte header (`b"SWR\0" + u16 version`) followed by a sequence of
 //! zstd-compressed blocks, each `u32 length` (LE) + `length` bytes of
@@ -21,7 +21,8 @@
 //!
 //! - **Process identity is recorded once per pid, not once per tick.**
 //!   Metadata such as name, command line, user, executable, cwd,
-//!   project and system/tool category often remains unchanged across many ticks.
+//!   project, system/tool category and container membership often remain unchanged
+//!   across many ticks.
 //!   [`ProcIdentity`] carries those fields and is only emitted the
 //!   first time a pid is seen, or again if its identity changes — pid
 //!   reuse means "have we seen this pid" isn't the right test, so the
@@ -76,7 +77,8 @@ pub const MAGIC: &[u8; 4] = b"SWR\0";
 /// dedup + zstd block compression (see module docs).
 // v4 retains executable, cwd and project attribution for historical grouping.
 // v5 retains system/tool category, including changes for an existing PID.
-pub const FORMAT_VERSION: u16 = 5;
+// v6 retains Docker container membership, including changes for an existing PID.
+pub const FORMAT_VERSION: u16 = 6;
 
 /// Ticks buffered per compressed block. Small enough that `R` then a
 /// quick `R` to stop doesn't lose much to an unflushed partial block;
@@ -114,6 +116,7 @@ struct ProcIdentity {
     exe: Option<String>,
     cwd: Option<String>,
     project: Option<crate::collect::ProjectIdentity>,
+    docker_container: Option<String>,
 }
 
 impl ProcIdentity {
@@ -129,6 +132,7 @@ impl ProcIdentity {
             exe: p.exe.clone(),
             cwd: p.cwd.clone(),
             project: p.project.clone(),
+            docker_container: p.docker_container.clone(),
         }
     }
 }
@@ -195,6 +199,7 @@ impl ProcVolatile {
             exe: identity.exe.clone(),
             cwd: identity.cwd.clone(),
             project: identity.project.clone(),
+            docker_container: identity.docker_container.clone(),
             cpu_pct: self.cpu_pct,
             mem_rss: self.mem_rss,
             mem_virt: self.mem_virt,
@@ -915,6 +920,44 @@ mod tests {
             after.iter().find(|g| g.label == "pi").unwrap().cpu_pct,
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn round_trip_preserves_docker_membership_changes_and_project_override() {
+        use crate::cpu::{groups, GroupMode};
+        std::fs::create_dir_all(".tmp").unwrap();
+        let dir = tempfile::tempdir_in(".tmp").unwrap();
+        let path = dir.path().join("containers.swr");
+        let mut snap = snap_at(1);
+        snap.cpu.per_core = vec![0.0; 8];
+        snap.procs = vec![proc(100, "postgres", 80.0)];
+        snap.procs[0].cwd = Some("/data".into());
+        let ids = [Some("a".repeat(64)), Some("b".repeat(64)), None];
+        {
+            let mut recorder = Recorder::create(path.clone()).unwrap();
+            for id in &ids {
+                snap.procs[0].docker_container = id.clone();
+                recorder.push(&snap).unwrap();
+                snap.t += Duration::from_secs(1);
+            }
+        }
+        let back = read(&path).unwrap();
+        assert_eq!(back.len(), 3);
+        for (snap, expected) in back.iter().zip(ids) {
+            assert_eq!(snap.procs[0].docker_container, expected);
+            assert_eq!(snap.procs[0].ppid, 1);
+            let grouped = groups(snap, GroupMode::Project);
+            assert_eq!(grouped.len(), 1);
+            assert_eq!(
+                grouped[0].label,
+                if expected.is_some() {
+                    "Docker"
+                } else {
+                    "/data"
+                }
+            );
+            assert_eq!(grouped[0].cpu_pct, Some(10.0));
+        }
     }
 
     #[test]

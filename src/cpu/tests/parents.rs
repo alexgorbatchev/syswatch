@@ -120,7 +120,7 @@ fn session_launchers_do_not_own_the_tools_they_launch_but_tool_shells_are_transp
         "systemd",
         "sshd",
         "redis-server",
-        "dockerd",
+        "Docker",
         "qemu-system-x86_64",
     ] {
         assert_eq!(

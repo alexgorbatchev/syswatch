@@ -798,32 +798,74 @@ impl App {
         self.settings_editing = false;
     }
 
+    /// Reconcile stable selection before drawing or handling navigation. A
+    /// singleton can become a group, and an exited PID needs a nearby fallback.
+    pub(crate) fn prepare_dense_rows(&mut self) -> Vec<crate::cpu::RowKey> {
+        use crate::cpu::{self, GroupMode, RowKey};
+        let (keys, selected, members) = self
+            .displayed_snap()
+            .map(|snap| {
+                let groups = cpu::groups(snap, GroupMode::Project);
+                let rows = cpu::rows(snap, GroupMode::Project, &groups, &self.dense.tree);
+                let keys: Vec<_> = rows.iter().map(|row| row.key.clone()).collect();
+                let current = self.dense.tree.selected.as_ref();
+                let exact = current.and_then(|key| keys.iter().position(|row| row == key));
+                let membership = || {
+                    rows.iter().rposition(|row| {
+                        row.members.iter().any(|p| {
+                            let key = RowKey::Process(p.pid, p.start_time);
+                            current == Some(&key) || self.dense.selected_members.contains(&key)
+                        })
+                    })
+                };
+                let nearby = || {
+                    let previous = &self.dense.previous_rows;
+                    let index =
+                        current.and_then(|key| previous.iter().position(|row| row == key))?;
+                    previous[index + 1..]
+                        .iter()
+                        .chain(previous[..index].iter().rev())
+                        .find_map(|key| keys.iter().position(|row| row == key))
+                        .or_else(|| (!keys.is_empty()).then(|| index.min(keys.len() - 1)))
+                };
+                let index = exact.or_else(membership).or_else(nearby).unwrap_or(0);
+                let row = rows.get(index);
+                let selected = row.map(|row| row.key.clone());
+                let members = row
+                    .map(|row| {
+                        row.members
+                            .iter()
+                            .map(|p| RowKey::Process(p.pid, p.start_time))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (keys, selected, members)
+            })
+            .unwrap_or_default();
+        self.dense.tree.selected = selected;
+        self.dense.previous_rows = keys.clone();
+        self.dense.selected_members = members;
+        keys
+    }
+
     /// Dense's key surface. Like Lite it advertises every key it answers to in
     /// its own box borders, so this list and those borders must stay in step.
     fn handle_dense_key(&mut self, k: KeyEvent) -> bool {
         // Resolve the cursor against the same order the table draws, so moving
         // the selection and rendering it can never disagree.
-        let procs: Vec<u32> = self
-            .snap
+        let rows = self.prepare_dense_rows();
+        let count = rows.len();
+        let cur = self
+            .dense
+            .tree
+            .selected
             .as_ref()
-            .map(|s| {
-                crate::ui::dense::sorted_procs(s, &self.history, &self.dense)
-                    .iter()
-                    .map(|p| p.pid)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let count = procs.len();
-        let cur = crate::ui::dense::selected_index_by_pid(
-            self.dense.selected_pid,
-            self.dense.selected,
-            &procs,
-        );
+            .and_then(|key| rows.iter().position(|row| row == key))
+            .unwrap_or(0);
         let visible =
             crate::ui::dense::Layout::with_zoom(self.last_area, self.dense.zoom).visible_procs();
         let goto = |app: &mut Self, i: usize| {
-            app.dense.selected = i;
-            app.dense.selected_pid = procs.get(i).copied();
+            app.dense.tree.selected = rows.get(i).cloned();
         };
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), _) => return true,
@@ -858,6 +900,16 @@ impl App {
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => goto(self, cur.saturating_sub(1)),
             (KeyCode::Home, _) => goto(self, 0),
             (KeyCode::End, _) => goto(self, count.saturating_sub(1)),
+            (KeyCode::Enter, _) => {
+                if let Some(key) = rows.get(cur) {
+                    if !matches!(key, crate::cpu::RowKey::Process(..))
+                        && !self.dense.tree.expanded.remove(key)
+                    {
+                        self.dense.tree.expanded.insert(key.clone());
+                    }
+                    goto(self, cur);
+                }
+            }
             (KeyCode::PageDown, _) => {
                 if count > 0 {
                     goto(self, (cur + visible).min(count - 1));
@@ -866,6 +918,9 @@ impl App {
             (KeyCode::PageUp, _) => goto(self, cur.saturating_sub(visible)),
             _ => {}
         }
+        // Remember the membership of the row chosen by this key, rather than
+        // the row that was selected before navigation.
+        self.prepare_dense_rows();
         false
     }
 
@@ -1450,6 +1505,9 @@ pub fn run(opts: Options) -> Result<()> {
         }
 
         if needs_draw {
+            if app.view_mode == ViewMode::Dense {
+                app.prepare_dense_rows();
+            }
             // Lite's key handler needs the frame geometry to clamp
             // scrolling, and only the renderer normally sees it.
             if let Ok(size) = term.size() {
@@ -2237,13 +2295,16 @@ mod tests {
         let mut app = App::new(TabId::Overview, SyswatchConfig::default());
         app.view_mode = ViewMode::Dense;
         app.last_area = Rect::new(0, 0, GRID_W, GRID_H);
-        // Two points apart so every row sits in its own load band and Dense
-        // orders them simply by pid.
-        let s = snap_with(
+        // Distinct tools keep forty top-level rows in the project tree.
+        let mut s = snap_with(
             (0..40)
-                .map(|i| proc(100 + i, 90.0 - i as f32 * 2.0))
+                .map(|i| ProcTick {
+                    name: format!("tool-{i:02}"),
+                    ..proc(100 + i, 0.0)
+                })
                 .collect(),
         );
+        s.cpu.per_core = vec![0.0];
         app.history.push(&s);
         app.snap = Some(s);
 
@@ -2261,7 +2322,10 @@ mod tests {
         assert!(screen.contains(&window), "at the bottom:\n{screen}");
 
         let screen = press(&mut app, KeyCode::Up, 3);
-        assert_eq!(app.dense.selected, 36);
+        assert_eq!(
+            app.dense.tree.selected,
+            Some(crate::cpu::RowKey::Process(136, None))
+        );
         assert!(
             screen.contains(&window),
             "the table scrolled under the cursor:\n{screen}"
@@ -2412,12 +2476,15 @@ mod tests {
     fn views_do_not_share_a_selection() {
         let mut app = App::new(TabId::Overview, SyswatchConfig::default());
         app.lite.selected = 4;
-        app.dense.selected = 9;
+        app.dense.tree.selected = Some(crate::cpu::RowKey::Process(9, None));
         app.cycle_view();
         app.cycle_view();
         app.cycle_view();
         assert_eq!(app.lite.selected, 4);
-        assert_eq!(app.dense.selected, 9);
+        assert_eq!(
+            app.dense.tree.selected,
+            Some(crate::cpu::RowKey::Process(9, None))
+        );
     }
 
     #[test]

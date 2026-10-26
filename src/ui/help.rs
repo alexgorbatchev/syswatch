@@ -139,6 +139,10 @@ const GROUPS: &[Group] = &[
         title: "Dense view (V)",
         rows: &[
             Row {
+                keys: "Enter",
+                label: "Expand / collapse project, checkout, tool or helper group",
+            },
+            Row {
                 keys: "1 – 6",
                 label: "Zoom that box to the full screen; same key or Esc to go back",
             },
@@ -152,7 +156,7 @@ const GROUPS: &[Group] = &[
             },
             Row {
                 keys: "Home / End",
-                label: "First / last process",
+                label: "First / last tree row",
             },
             Row {
                 keys: "t",

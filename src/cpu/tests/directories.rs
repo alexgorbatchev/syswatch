@@ -105,6 +105,60 @@ fn directory_groups_keep_system_last_and_sort_by_cpu_band_then_path() {
 }
 
 #[test]
+fn repositories_precede_other_groups_only_within_their_cpu_bucket() {
+    let mut procs = vec![
+        in_directory(1, "/bin/fast-tool", None, 80.0),
+        in_directory(2, "/bin/node", None, 112.0),
+        in_directory(3, "/bin/alpha-tool", None, 32.0),
+        in_directory(4, "/bin/node", None, 8.0),
+        in_directory(5, "/bin/node", None, 24.0),
+        in_directory(6, "/bin/node", None, 16.0),
+        in_directory(7, "/bin/daemon", None, 800.0),
+        in_directory(8, "/bin/node", None, 0.0),
+        in_directory(9, "/bin/node", None, 8.0),
+        in_directory(10, "/bin/node", Some("/scratch"), 8.0),
+    ];
+    for (index, host, repo) in [
+        (1, "github.com", "z/fast"),
+        (3, "github.com", "z/slow"),
+        (4, "github.com", "b/slow"),
+        (5, "gitlab.com", "a/other"),
+        (7, "github.com", "a/system"),
+        (8, "", "c/local"),
+    ] {
+        procs[index].project = Some(ProjectIdentity {
+            host: host.into(),
+            repo: repo.into(),
+            checkout: format!("/work/{repo}"),
+        });
+    }
+    procs[6].scope = ProcessScope::System;
+    procs[7].scope = ProcessScope::System;
+    let snap = snapshot(procs);
+    for input in [
+        snap.clone(),
+        snapshot(snap.procs.into_iter().rev().collect()),
+    ] {
+        let grouped = groups(&input, GroupMode::Project);
+        assert_eq!(
+            grouped.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
+            [
+                "z/fast",
+                "fast-tool",
+                "a/other",
+                "b/slow",
+                "c/local",
+                "z/slow",
+                "/scratch",
+                "alpha-tool",
+                "daemon",
+                "a/system",
+            ]
+        );
+    }
+}
+
+#[test]
 fn changing_directories_updates_current_groups_without_rewriting_history() {
     let first = snapshot(vec![
         in_directory(1, "/bin/node", Some("/work/first"), 80.0),
@@ -172,6 +226,89 @@ fn git_projects_combine_working_subdirectories_under_the_checkout() {
         ["git", "node", "pi", "yazi"]
     );
     assert_eq!(visible.iter().filter(|r| r.process.is_some()).count(), 4);
+}
+
+#[test]
+fn local_repositories_with_matching_names_share_a_group_and_keep_their_checkouts() {
+    let mut procs = vec![
+        in_directory(1, "/bin/yazi", Some("/synced/engine-dj-app"), 8.0),
+        in_directory(2, "/bin/node", Some("/projects/engine-dj-app/src"), 16.0),
+        in_directory(3, "/bin/pi", Some("/projects/engine-dj-app"), 24.0),
+        in_directory(4, "/bin/node", Some("/projects/another-app"), 0.0),
+        in_directory(5, "/bin/node", Some("/remote/engine-dj-app"), 0.0),
+    ];
+    for (index, host, repo, checkout) in [
+        (0, "", "engine-dj-app", "/synced/engine-dj-app"),
+        (1, "", "engine-dj-app", "/projects/engine-dj-app"),
+        (2, "", "engine-dj-app", "/projects/engine-dj-app"),
+        (3, "", "another-app", "/projects/another-app"),
+        (
+            4,
+            "git.example.com",
+            "engine-dj-app",
+            "/remote/engine-dj-app",
+        ),
+    ] {
+        procs[index].project = Some(ProjectIdentity {
+            host: host.into(),
+            repo: repo.into(),
+            checkout: checkout.into(),
+        });
+    }
+    let snap = snapshot(procs);
+    let grouped = groups(&snap, GroupMode::Project);
+    assert_eq!(grouped.len(), 3);
+    let local = grouped
+        .iter()
+        .find(|g| {
+            matches!(&g.key,
+                GroupKey::Project { host, repo } if host.is_empty() && repo == "engine-dj-app"
+            )
+        })
+        .unwrap();
+    assert_eq!((local.members.len(), local.cpu_pct), (3, Some(6.0)));
+    let mut state = CpuState::default();
+    state.expanded.insert(RowKey::Group(local.key.clone()));
+    let visible = rows(&snap, GroupMode::Project, &grouped, &state);
+    let root = visible
+        .iter()
+        .find(|row| row.key == RowKey::Group(local.key.clone()))
+        .unwrap();
+    assert_eq!(
+        (root.label.as_str(), root.count, root.mem_rss),
+        ("engine-dj-app", 3, 6 * 1024)
+    );
+    let checkouts: Vec<_> = visible.iter().filter(|row| row.depth == 1).collect();
+    assert_eq!(
+        checkouts
+            .iter()
+            .map(|row| (row.label.as_str(), row.count))
+            .collect::<Vec<_>>(),
+        [("/projects/engine-dj-app", 2), ("/synced/engine-dj-app", 1)]
+    );
+    assert_eq!(
+        checkouts.iter().map(|row| row.mem_rss).sum::<u64>(),
+        root.mem_rss
+    );
+    state.expanded.insert(checkouts[1].key.clone());
+    let visible = rows(&snap, GroupMode::Project, &grouped, &state);
+    let leaves: Vec<_> = visible
+        .iter()
+        .filter_map(|row| row.process.map(|p| p.pid))
+        .collect();
+    assert_eq!(leaves, [1]);
+    state.expanded.insert(checkouts[0].key.clone());
+    let visible = rows(&snap, GroupMode::Project, &grouped, &state);
+    let mut leaves: Vec<_> = visible
+        .iter()
+        .filter_map(|row| row.process.map(|p| p.pid))
+        .collect();
+    leaves.sort_unstable();
+    assert_eq!(leaves, [1, 2, 3]);
+    assert_eq!(
+        GroupTotals::new(&snap).get(GroupMode::Project, &local.key),
+        6.0
+    );
 }
 
 #[test]
@@ -251,7 +388,7 @@ fn application_expansion_is_independent_in_each_directory_and_survives_reorderin
 }
 
 #[test]
-fn home_directories_sort_before_alphabetic_names_within_each_cpu_band() {
+fn home_directories_sort_before_other_names_after_repositories_in_each_cpu_band() {
     let home = dirs::home_dir().unwrap();
     let mut procs = vec![
         in_directory(1, "/bin/node", home.to_str(), 8.0),
@@ -271,10 +408,10 @@ fn home_directories_sort_before_alphabetic_names_within_each_cpu_band() {
         grouped.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
         [
             "busy/repo",
+            "acme/web",
             "~",
             "~/alpha",
             "~/Zulu",
-            "acme/web",
             "~/system"
         ]
     );

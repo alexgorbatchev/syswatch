@@ -31,14 +31,10 @@ pub(super) fn of(process: &ProcTick) -> Option<Location<'_>> {
 impl Location<'_> {
     pub fn group(&self) -> (GroupKey, String, char) {
         match self {
-            Self::Checkout { host, repo, path } => (
+            Self::Checkout { host, repo, .. } => (
                 GroupKey::Project {
                     host: (*host).into(),
-                    repo: if host.is_empty() {
-                        (*path).into()
-                    } else {
-                        (*repo).into()
-                    },
+                    repo: (*repo).into(),
                 },
                 (*repo).into(),
                 '\u{e725}',

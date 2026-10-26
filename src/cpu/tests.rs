@@ -1,4 +1,6 @@
 use super::*;
+
+mod docker;
 use crate::collect::{CpuTick, ProcTick, ProcessScope, ProjectIdentity, Snapshot};
 
 mod directories;
@@ -54,7 +56,7 @@ fn helpers_combine_across_owners_below_development_services() {
         assert_eq!(
             grouped.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
             [
-                "dockerd",
+                "Docker",
                 "postgres",
                 "qemu-system-x86_64",
                 "redis-server",

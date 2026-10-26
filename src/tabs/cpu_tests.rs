@@ -110,7 +110,11 @@ fn expanded_processes_have_a_separate_pid_column() {
         let count_column = header[..header.find("Procs").unwrap()].chars().count();
         let cpu_column = header[..header.find("CPU").unwrap()].chars().count();
         assert!(count_column < pid_column, "{header}");
-        let group = lines.iter().find(|l| l.contains("▾")).unwrap();
+        let group = lines
+            .iter()
+            .skip_while(|l| !l.contains("Procs") || !l.contains("CPU"))
+            .find(|l| l.contains('%'))
+            .unwrap();
         let leaf = lines
             .iter()
             .find(|l| {
@@ -202,7 +206,7 @@ fn owning_tool_expands_helpers_with_pids_and_explains_ownership_in_both_modes() 
         assert!(
             screen
                 .lines()
-                .any(|l| l.contains("▾") && l.contains("pi") && l.contains("30%")),
+                .any(|l| l.contains("pi") && l.contains("30%")),
             "{screen}"
         );
         assert!(
@@ -243,7 +247,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         assert!(
             before
                 .lines()
-                .any(|l| l.contains('▸') && l.contains("acme/web")),
+                .any(|l| !l.contains('─') && l.contains("acme/web")),
             "{before}"
         );
         assert!(!before.contains("1161583"), "{before}");
@@ -253,7 +257,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         assert!(
             project
                 .lines()
-                .any(|l| l.contains('▸') && l.contains("/work/web")),
+                .any(|l| l.contains("╰─") && l.contains("/work/web")),
             "{project}"
         );
         assert!(!project.contains("1161583"), "{project}");
