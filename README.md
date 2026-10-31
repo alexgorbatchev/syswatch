@@ -4,9 +4,7 @@
     <strong>System diagnostics in your terminal.</strong>
   </p>
   <p align="center">
-    <a href="https://crates.io/crates/syswatch"><img src="https://img.shields.io/crates/v/syswatch.svg" alt="crates.io"></a>
-    <a href="https://github.com/matthart1983/syswatch/releases"><img src="https://img.shields.io/github/v/release/matthart1983/syswatch" alt="Release"></a>
-    <a href="https://repology.org/project/syswatch/versions"><img src="https://repology.org/badge/tiny-repos/syswatch.svg" alt="Packaging status"></a>
+    <a href="https://github.com/alexgorbatchev/syswatch/releases"><img src="https://img.shields.io/github/v/release/alexgorbatchev/syswatch" alt="Release"></a>
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   </p>
@@ -24,17 +22,21 @@ Monitor CPU, memory, disks, processes, GPU, power and network activity on macOS 
 
 ## Install
 
-```bash
-brew install syswatch                 # macOS / Linux
-nix-shell -p syswatch                 # NixOS / Nix
-paru -S syswatch                      # Arch (AUR)
-cargo install syswatch                # build from source with Rust
-```
+Download a versioned archive for your platform from this fork's
+[GitHub Releases](https://github.com/alexgorbatchev/syswatch/releases).
+The release workflow packages macOS and Linux binaries (x86_64 and aarch64),
+static Linux variants, and an armv5te static build for older NAS hardware.
+Each archive contains `syswatch` and its MIT license; `SHA256SUMS` covers all archives.
 
-[Prebuilt binaries](https://github.com/matthart1983/syswatch/releases/latest)
-are available for macOS and Linux (x86_64 and aarch64), with static Linux builds
-and an armv5te build for older NAS hardware.
-[Build from source](docs/REFERENCE.md#build-from-source).
+1. Download your archive and `SHA256SUMS` from the same release.
+2. Verify the archive with `sha256sum --ignore-missing -c SHA256SUMS` on Linux,
+   or `shasum -a 256 <archive>` on macOS and compare it with `SHA256SUMS`.
+   Stop if the checksum differs.
+3. Extract the archive with `tar xzf <archive>`, then install the executable in
+   a directory on your `PATH`, for example `install -m 755 syswatch ~/.local/bin/syswatch`
+   after creating `~/.local/bin` and adding it to your `PATH`.
+
+Package-manager distributions of upstream SysWatch do not contain this fork's changes.
 
 ## Run
 

@@ -141,14 +141,17 @@ fn dense_tree_drills_through_checkout_and_parent_tool_to_full_pid() {
     assert!(!screen.contains('▸') && !screen.contains('▾'), "{screen}");
     for (label, branch) in [
         ("/work/assistant", "╰─"),
-        ("290376", "╰─"),
-        ("3845642", "├─"),
+        ("290376", "╰ "),
+        ("3845642", "├ "),
     ] {
         let row = screen
             .lines()
             .find(|line| line.contains(label) && line.contains('%'))
             .unwrap();
         assert!(row.contains(branch), "{row}");
+        if label != "/work/assistant" {
+            assert!(!row.contains('─'), "process leaf connector: {row}");
+        }
     }
     let root = screen
         .lines()

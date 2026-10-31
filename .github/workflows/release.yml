@@ -3,13 +3,38 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  check:
+    runs-on: ${{ matrix.os }}
     strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked -- -W clippy::all
+      - run: cargo test --locked
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -42,6 +67,16 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
+      - name: Validate version
+        shell: bash
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "syswatch") | .version')
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Release tag must match Cargo.toml version v$version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Install aarch64 cross-compiler (Linux aarch64 glibc)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -60,167 +95,70 @@ jobs:
 
       - name: Install zig + cargo-zigbuild (Linux musl)
         if: contains(matrix.target, 'linux-musl') && !startsWith(matrix.target, 'armv5te')
-        run: |
-          python3 -m pip install --user ziglang cargo-zigbuild
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild,zig
 
       - name: Build
         shell: bash
         run: |
           if [[ "${{ matrix.target }}" == armv5te-* ]]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --release --locked --target ${{ matrix.target }}
           elif [[ "${{ matrix.target }}" == *"linux-musl" ]]; then
-            cargo zigbuild --release --target ${{ matrix.target }}
+            cargo zigbuild --release --locked --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --release --locked --target ${{ matrix.target }}
           fi
 
       - name: Package
+        shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/syswatch ${{ matrix.name }}
-          tar czf ${{ matrix.name }}.tar.gz ${{ matrix.name }}
+          mkdir -p package dist
+          cp target/${{ matrix.target }}/release/syswatch LICENSE package/
+          tar czf "dist/${{ matrix.name }}-${VERSION}.tar.gz" -C package syswatch LICENSE
+
+      - name: Smoke test native archive
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          mkdir smoke
+          tar xzf "dist/${{ matrix.name }}-${VERSION}.tar.gz" -C smoke
+          test -s smoke/LICENSE
+          smoke/syswatch --version
+          smoke/syswatch --help
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.tar.gz
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: syswatch-*
+          path: dist
           merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
-          files: '*.tar.gz'
-
-  publish:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Publish to crates.io
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  homebrew:
-    needs: release
-    # Skip homebrew formula update for pre-release tags (e.g. v0.2.0-rc.1).
-    # Brew has no pre-release concept, so any formula push reaches every
-    # `brew upgrade` user.
-    if: ${{ !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Compute sha256 for each release asset
-        id: sha
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          for asset in \
-            syswatch-macos-x86_64.tar.gz \
-            syswatch-macos-aarch64.tar.gz \
-            syswatch-linux-x86_64-static.tar.gz \
-            syswatch-linux-aarch64-static.tar.gz
-          do
-            url="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/${asset}"
-            for i in 1 2 3 4 5; do
-              if curl -sLf "${url}" -o "${asset}"; then break; fi
-              echo "Download ${asset} attempt $i failed, retrying..."; sleep 5
-            done
-            test -s "${asset}" || { echo "Failed to download ${asset}"; exit 1; }
-            hash=$(sha256sum "${asset}" | awk '{print $1}')
-            key=$(echo "${asset}" | sed -E 's/syswatch-//; s/\.tar\.gz$//; s/-/_/g')
-            echo "sha_${key}=${hash}" >> $GITHUB_OUTPUT
-          done
-
-      - name: Check out homebrew-tap
-        uses: actions/checkout@v4
-        with:
-          repository: matthart1983/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-
-      - name: Regenerate Formula
-        env:
-          VERSION: ${{ steps.sha.outputs.version }}
-          SHA_MACOS_X86_64: ${{ steps.sha.outputs.sha_macos_x86_64 }}
-          SHA_MACOS_AARCH64: ${{ steps.sha.outputs.sha_macos_aarch64 }}
-          SHA_LINUX_X86_64: ${{ steps.sha.outputs.sha_linux_x86_64_static }}
-          SHA_LINUX_AARCH64: ${{ steps.sha.outputs.sha_linux_aarch64_static }}
-        run: |
-          cat > homebrew-tap/Formula/syswatch.rb <<EOF
-          class Syswatch < Formula
-            desc "Single-host system diagnostics TUI — sibling to netwatch"
-            homepage "https://github.com/matthart1983/syswatch"
-            version "${VERSION}"
-            license "MIT"
-
-            on_macos do
-              on_arm do
-                url "https://github.com/matthart1983/syswatch/releases/download/v${VERSION}/syswatch-macos-aarch64.tar.gz"
-                sha256 "${SHA_MACOS_AARCH64}"
-
-                def install
-                  bin.install "syswatch-macos-aarch64" => "syswatch"
-                end
-              end
-              on_intel do
-                url "https://github.com/matthart1983/syswatch/releases/download/v${VERSION}/syswatch-macos-x86_64.tar.gz"
-                sha256 "${SHA_MACOS_X86_64}"
-
-                def install
-                  bin.install "syswatch-macos-x86_64" => "syswatch"
-                end
-              end
-            end
-
-            on_linux do
-              on_arm do
-                url "https://github.com/matthart1983/syswatch/releases/download/v${VERSION}/syswatch-linux-aarch64-static.tar.gz"
-                sha256 "${SHA_LINUX_AARCH64}"
-
-                def install
-                  bin.install "syswatch-linux-aarch64-static" => "syswatch"
-                end
-              end
-              on_intel do
-                url "https://github.com/matthart1983/syswatch/releases/download/v${VERSION}/syswatch-linux-x86_64-static.tar.gz"
-                sha256 "${SHA_LINUX_X86_64}"
-
-                def install
-                  bin.install "syswatch-linux-x86_64-static" => "syswatch"
-                end
-              end
-            end
-
-            test do
-              assert_match "syswatch", shell_output("#{bin}/syswatch --help 2>&1", 1)
-            end
-          end
-          EOF
-
-      - name: Commit and push formula
-        run: |
-          cd homebrew-tap
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Stage first, then diff against HEAD. `git diff` (unstaged)
-          # ignores untracked files, so a brand-new formula would
-          # falsely report "no change" on the first release.
-          git add Formula/syswatch.rb
-          if git diff --cached --quiet -- Formula/syswatch.rb; then
-            echo "Formula already up to date"; exit 0
-          fi
-          git commit -m "syswatch ${{ steps.sha.outputs.version }}: auto-update formula"
-          git push origin main
+          body: Prebuilt SysWatch binaries for macOS and Linux, including static Linux builds and SHA-256 checksums.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
