@@ -93,11 +93,18 @@ jobs:
         with:
           tool: cross
 
-      - name: Install zig + cargo-zigbuild (Linux musl)
+      - name: Install Zig (Linux musl)
+        if: contains(matrix.target, 'linux-musl') && !startsWith(matrix.target, 'armv5te')
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          cache-key: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild (Linux musl)
         if: contains(matrix.target, 'linux-musl') && !startsWith(matrix.target, 'armv5te')
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild,zig
+          tool: cargo-zigbuild
 
       - name: Build
         shell: bash
