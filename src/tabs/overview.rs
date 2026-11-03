@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{App, Snapshot};
 use crate::insights::Severity;
+use crate::process_tree::{self, Metric};
 use crate::ui::{
     graph::{self, GraphStyle},
     palette as p,
@@ -243,17 +244,22 @@ fn draw_per_core(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) 
     );
 }
 
+/// Top-level groups of the shared process tree, collapsed. The tree itself
+/// is navigated on the CPU and Procs tabs.
 fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
-    let block = panel("Top processes (by CPU)");
+    let block = panel(format!(
+        "Top consumers (by CPU · {})",
+        app.user_config.cpu_group.label()
+    ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let header = Row::new(vec![
+        Cell::from("APPLICATION / PROJECT"),
+        Cell::from("PROCS"),
         Cell::from("PID"),
-        Cell::from("USER"),
-        Cell::from("%CPU"),
+        Cell::from("CPU"),
         Cell::from("%MEM"),
-        Cell::from("COMMAND"),
     ])
     .style(
         Style::default()
@@ -264,12 +270,20 @@ fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     // Cells without an explicit fg inherit the Table's base style. ratatui
     // Cell::style overrides that, so for fade to actually affect every
     // column we have to set an explicit fg on each cell (then fade it).
-    // Otherwise only the %CPU column (which carries a kpi_color fg) would
+    // Otherwise only the CPU column (which carries a kpi_color fg) would
     // dim and the rest of the row would stay full-bright, making the fade
     // look broken.
     let take = inner.height.saturating_sub(1) as usize;
-    let rendered_rows = snap.procs.iter().take(take).count();
-    let rows = snap.procs.iter().take(take).enumerate().map(|(i, p_)| {
+    let groups = app.summary_rows(snap, Metric::Cpu);
+    let rendered_rows = groups.len().min(take);
+    let pid_width = groups
+        .iter()
+        .take(take)
+        .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
+        .max()
+        .unwrap_or(0)
+        .max(3) as u16;
+    let rows = groups.iter().take(take).enumerate().map(|(i, row)| {
         let row_alpha = if app.user_config.graph_fade {
             crate::ui::graph::row_fade_alpha(i, rendered_rows)
         } else {
@@ -286,28 +300,53 @@ fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         };
         let plain_fg = fade(Style::default().fg(p::text_primary()));
         let muted_fg = fade(Style::default().fg(p::text_muted()));
+        let cpu = row.totals.cpu_pct;
+        let mut name = Line::from(vec![
+            Span::styled(format!("{} ", row.icon), plain_fg),
+            Span::styled(row.label.clone(), plain_fg),
+        ]);
+        if process_tree::system_only(&row.members) {
+            name.spans.push(Span::styled(" [system]", muted_fg));
+        }
         Row::new(vec![
-            Cell::from(p_.pid.to_string()).style(plain_fg),
-            Cell::from(p_.user.clone()).style(muted_fg),
-            Cell::from(format!("{:.1}", p_.cpu_pct))
-                .style(fade(Style::default().fg(kpi_color(p_.cpu_pct, 30.0, 70.0)))),
-            Cell::from(format!("{:.1}", mem_pct(p_.mem_rss, snap.mem.total_bytes))).style(plain_fg),
-            Cell::from(p_.name.clone()).style(plain_fg),
+            Cell::from(name),
+            Cell::from(if row.count == 1 {
+                String::new()
+            } else {
+                row.count.to_string()
+            })
+            .style(muted_fg),
+            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()).style(muted_fg),
+            Cell::from(
+                cpu.map(|pct| format!("{pct:.0}%"))
+                    .unwrap_or_else(|| "n/a".into()),
+            )
+            .style(fade(
+                Style::default().fg(cpu
+                    .map(|pct| kpi_color(pct, 30.0, 70.0))
+                    .unwrap_or_else(p::text_muted)),
+            )),
+            Cell::from(format!(
+                "{:.1}",
+                mem_pct(row.totals.mem_rss, snap.mem.total_bytes)
+            ))
+            .style(plain_fg),
         ])
     });
 
     let widths = [
-        Constraint::Length(7),
-        Constraint::Length(10),
-        Constraint::Length(6),
-        Constraint::Length(6),
-        Constraint::Min(0),
+        Constraint::Min(12),
+        Constraint::Length(5),
+        Constraint::Length(pid_width),
+        Constraint::Length(4),
+        Constraint::Length(5),
     ];
     // Cells without an explicit fg inherit this style's fg. Without setting
     // it, cells render with `Color::Reset` (terminal default fg), which on a
     // dark-terminal user with the light theme picks the wrong color.
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(1)
         .style(Style::default().fg(p::text_primary()).bg(p::bg()));
     f.render_widget(table, inner);
 }
@@ -426,5 +465,70 @@ mod tests {
     #[test]
     fn max_or_single_element() {
         assert_eq!(max_or(&[42.0], 0.0), 42.0);
+    }
+
+    fn grouped_snapshot() -> Snapshot {
+        let proc = |pid, name: &str, cpu, power| crate::collect::ProcTick {
+            pid,
+            name: name.into(),
+            exe: Some(format!("/bin/{name}")),
+            cpu_pct: cpu,
+            mem_rss: 1024,
+            power_w: Some(power),
+            ..Default::default()
+        };
+        Snapshot {
+            cpu: crate::collect::CpuTick {
+                per_core: vec![0.0; 8],
+                ..Default::default()
+            },
+            procs: vec![
+                proc(10, "browser", 240.0, 0.6),
+                proc(11, "browser", 80.0, 0.6),
+                proc(20, "postgres", 8.0, 0.9),
+                proc(30, "idle", 0.0, 0.001),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn screen(width: u16, height: u16, draw: impl FnOnce(&mut Frame)) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(draw).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn top_consumers_are_collapsed_groups_of_the_shared_tree() {
+        let mut app = App::new(
+            crate::app::TabId::Overview,
+            crate::config::SyswatchConfig::default(),
+        );
+        let snap = grouped_snapshot();
+        let rows = screen(80, 12, |f| draw_top_procs(f, f.area(), &app, &snap));
+        assert!(rows[0].contains("Top consumers (by CPU · Application)"));
+        let browser = rows.iter().find(|l| l.contains("browser")).unwrap();
+        assert!(
+            browser.contains(" 2 ") && browser.contains("40%"),
+            "{browser}"
+        );
+        let postgres = rows.iter().position(|l| l.contains("postgres")).unwrap();
+        assert!(rows[postgres].contains(" 20 "), "{}", rows[postgres]);
+        assert!(!rows.iter().any(|l| l.contains(" 10 ")), "{rows:#?}");
+
+        let mut snap = snap;
+        snap.procs[2].scope = crate::collect::ProcessScope::System;
+        app.user_config.graph_fade = true;
+        app.user_config.cpu_group = crate::process_tree::GroupMode::Project;
+        let rows = screen(80, 12, |f| draw_top_procs(f, f.area(), &app, &snap));
+        assert!(rows[0].contains("Top consumers (by CPU · Project)"));
+        assert!(
+            rows.iter().any(|l| l.contains("postgres [system]")),
+            "{rows:#?}"
+        );
     }
 }

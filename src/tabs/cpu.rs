@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Snapshot};
-use crate::cpu::{self, CpuGroup, CpuRow, GroupKey};
+use crate::app::{App, Snapshot, TreeView};
+use crate::process_tree::{self, GroupKey, TreeGroup, TreeRow, TreeState};
 use crate::ui::{
     palette as p,
     widgets::{human_bytes, panel, sparkline_string},
@@ -17,10 +17,18 @@ use crate::ui::{
 #[path = "cpu_tests.rs"]
 mod tests;
 
+/// The CPU tab's process tree plus its core-activity and detail panes.
+#[derive(Debug, Clone, Default)]
+pub struct CpuState {
+    pub tree: TreeState,
+    pub show_cores: bool,
+    pub core_page: usize,
+    pub detail_scroll: usize,
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
-    let groups = cpu::groups(snap, app.user_config.cpu_group);
-    let rows = cpu::rows(snap, app.user_config.cpu_group, &groups, &app.cpu);
-    let selected = cpu::selected_index(&rows, &app.cpu);
+    let (groups, rows) = app.tree_rows(TreeView::Cpu, snap);
+    let selected = app.cpu.tree.selected_index(&rows);
     let roomy = area.height >= 24;
     let show_detail = roomy || (!app.cpu.show_cores && rows.get(selected).is_some());
     let sections = Layout::default()
@@ -62,25 +70,26 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     );
 }
 
-fn draw_assessment(f: &mut Frame, area: Rect, snap: &Snapshot, groups: &[CpuGroup<'_>]) {
+fn draw_assessment(f: &mut Frame, area: Rect, snap: &Snapshot, groups: &[TreeGroup<'_>]) {
     let mut lines = vec![Line::styled(
-        cpu::assessment(snap),
+        assessment(snap),
         Style::default().fg(p::text_primary()).bold(),
     )];
     if let Some(top) = groups
         .iter()
         .max_by(|a, b| {
-            a.cpu_pct
+            a.totals
+                .cpu_pct
                 .unwrap_or(0.0)
-                .total_cmp(&b.cpu_pct.unwrap_or(0.0))
+                .total_cmp(&b.totals.cpu_pct.unwrap_or(0.0))
         })
-        .filter(|g| g.cpu_pct.unwrap_or(0.0) > 0.0)
+        .filter(|g| g.totals.cpu_pct.unwrap_or(0.0) > 0.0)
     {
         lines.push(muted_deleted(format!(
             "{} {} is the largest observed CPU consumer ({:.0}% of machine).",
             top.icon,
             top.label,
-            top.cpu_pct.unwrap_or(0.0)
+            top.totals.cpu_pct.unwrap_or(0.0)
         )));
         lines.push(Line::styled(
             if top.members.len() == 1 && matches!(top.key, GroupKey::Application { .. }) {
@@ -102,6 +111,28 @@ fn draw_assessment(f: &mut Frame, area: Rect, snap: &Snapshot, groups: &[CpuGrou
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn assessment(snap: &Snapshot) -> &'static str {
+    if let Some(pressure) = &snap.pressure {
+        if pressure.cpu_some >= 10.0 {
+            return "CPU contention detected: tasks are waiting for processor time.";
+        }
+        if pressure.mem_some >= 10.0 {
+            return "Memory pressure detected; inspect the Memory tab.";
+        }
+        if pressure.io_some >= 10.0 {
+            return "I/O pressure detected; inspect the Disks tab.";
+        }
+        if snap.cpu.usage_pct >= 80.0 {
+            return "CPU busy; little CPU waiting detected.";
+        }
+        "No clear CPU contention in the available measurements."
+    } else if snap.cpu.usage_pct >= 80.0 {
+        "CPU activity is high; contention measurement unavailable."
+    } else {
+        "CPU under 80%; contention measurement unavailable."
+    }
 }
 
 /// Every chart ends at the displayed snapshot, including during replay/scrub.
@@ -173,7 +204,7 @@ fn draw_evidence(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot, samples:
     );
 }
 
-fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], selected: usize) {
+fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[TreeRow<'_>], selected: usize) {
     let block = panel(format!(
         "Largest CPU consumers · {} · system last",
         app.user_config.cpu_group.label()
@@ -203,11 +234,11 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
         let name = format!(
             "{}{} {}",
             prefix,
-            crate::ui::tree::icon(row, app.cpu.expanded.contains(&row.key)),
+            crate::ui::tree::icon(row, app.cpu.tree.expanded.contains(&row.key)),
             row.label
         );
         let mut name = muted_deleted(name);
-        if cpu::system_only(&row.members) {
+        if process_tree::system_only(&row.members) {
             name.spans.push(Span::styled(
                 " [system]",
                 Style::default()
@@ -215,7 +246,7 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
                     .add_modifier(Modifier::DIM),
             ));
         }
-        let trend = if row.depth == 0 && row.cpu_pct.is_some() {
+        let trend = if row.depth == 0 && row.totals.cpu_pct.is_some() {
             let mut values: Vec<_> = (app.scrub_offset..app.scrub_offset + trend_width)
                 .map_while(|offset| app.history.cpu_groups.nth_back(offset))
                 .map(|point| point.get(app.user_config.cpu_group, &row.group) / 100.0)
@@ -234,17 +265,19 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[CpuRow<'_>], select
             }),
             Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
             Cell::from(
-                row.cpu_pct
+                row.totals
+                    .cpu_pct
                     .map(|pct| format!("{pct:.0}%"))
                     .unwrap_or_else(|| "n/a".into()),
             )
             .style(
                 Style::default().fg(row
+                    .totals
                     .cpu_pct
                     .map(|pct| super::overview::kpi_color(pct, 30.0, 70.0))
                     .unwrap_or_else(p::text_muted)),
             ),
-            Cell::from(human_bytes(row.mem_rss)),
+            Cell::from(human_bytes(row.totals.mem_rss)),
             Cell::from(trend),
         ])
     });
@@ -299,11 +332,11 @@ fn muted_deleted(text: String) -> Line<'static> {
 const DELETED_EXPLANATION: &str =
     "(deleted): executable unlinked from disk; process still running.";
 
-pub(crate) fn detail_line_count(selected: Option<&CpuRow<'_>>) -> usize {
+pub(crate) fn detail_line_count(selected: Option<&TreeRow<'_>>) -> usize {
     detail_lines(selected).len()
 }
 
-fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
+fn detail_lines(selected: Option<&TreeRow<'_>>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(row) = selected {
         let system = row
@@ -328,7 +361,7 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
             if let Some(owner) = row.owner.filter(|owner| owner.pid != process.pid) {
                 lines.push(Line::raw(format!(
                     "Owning tool: {} · PID {}",
-                    cpu::application(owner).1,
+                    process_tree::application(owner).1,
                     owner.pid
                 )));
             }
@@ -338,7 +371,7 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                 process
                     .cwd
                     .as_deref()
-                    .map(cpu::display_path)
+                    .map(process_tree::display_path)
                     .unwrap_or_else(|| "unavailable".into())
             )));
             lines.push(Line::raw(
@@ -353,7 +386,7 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                         "Attributed by working directory · {}/{} · {}",
                         project.host,
                         project.repo,
-                        cpu::display_path(&project.checkout)
+                        process_tree::display_path(&project.checkout)
                     )
                 } else {
                     "No Git project attributed from this process's working directory.".into()
@@ -365,7 +398,7 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                     .exe
                     .as_deref()
                     .filter(|exe| !exe.is_empty())
-                    .map(cpu::display_path)
+                    .map(process_tree::display_path)
                     .unwrap_or_else(|| "unavailable".into())
             )));
         } else {
@@ -393,14 +426,14 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                     lines.push(Line::raw(
                         "Docker → containers → PIDs · overrides directory grouping",
                     ));
-                    if let cpu::RowKey::Container(id) = &row.key {
+                    if let process_tree::RowKey::Container(id) = &row.key {
                         lines.push(Line::raw(format!("Container ID: {id}")));
                     }
                 }
                 GroupKey::Directory { path } => {
                     lines.push(Line::raw(format!(
                         "Working directory: {}",
-                        cpu::display_path(path)
+                        process_tree::display_path(path)
                     )));
                     lines.push(Line::raw(
                         "No Git project discovered · expand: tool → helpers / PIDs.",
@@ -446,7 +479,7 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
                     lines.extend(
                         paths
                             .into_iter()
-                            .map(|path| muted_deleted(cpu::display_path(path))),
+                            .map(|path| muted_deleted(process_tree::display_path(path))),
                     );
                     if row.label == "Google Chrome" {
                         lines.push(Line::raw("Use Chrome's Task Manager to identify tabs/extensions; tab titles are not collected."));
@@ -458,7 +491,7 @@ fn detail_lines(selected: Option<&CpuRow<'_>>) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_detail(f: &mut Frame, area: Rect, selected: Option<&CpuRow<'_>>, scroll: usize) {
+fn draw_detail(f: &mut Frame, area: Rect, selected: Option<&TreeRow<'_>>, scroll: usize) {
     let lines = detail_lines(selected);
     let scroll = scroll
         .min(lines.len().saturating_sub(1))

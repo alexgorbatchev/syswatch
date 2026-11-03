@@ -488,10 +488,10 @@ fn dense_tree_container_id_stays_gray_while_busy_container_label_is_red() {
             let id = "abcdef01".repeat(8);
             app.snap.as_mut().unwrap().procs.truncate(1);
             app.snap.as_mut().unwrap().procs[0].docker_container = Some(id.clone());
-            let root = crate::cpu::RowKey::Group(crate::cpu::GroupKey::Docker);
+            let root = crate::process_tree::RowKey::Group(crate::process_tree::GroupKey::Docker);
             app.dense.tree.expanded.insert(root.clone());
             app.dense.tree.selected = Some(if selected {
-                crate::cpu::RowKey::Container(id.clone())
+                crate::process_tree::RowKey::Container(id.clone())
             } else {
                 root
             });
@@ -544,7 +544,7 @@ fn dense_tree_system_badge_is_gray_on_selected_and_unselected_rows() {
                 ..Default::default()
             },
         ];
-        app.dense.tree.selected = Some(crate::cpu::RowKey::Process(
+        app.dense.tree.selected = Some(crate::process_tree::RowKey::Process(
             if selected { 2 } else { 1 },
             None,
         ));
@@ -601,7 +601,7 @@ fn dense_tree_label_colors_follow_machine_cpu_thresholds_and_selection() {
                     ..Default::default()
                 },
             ];
-            app.dense.tree.selected = Some(crate::cpu::RowKey::Process(
+            app.dense.tree.selected = Some(crate::process_tree::RowKey::Process(
                 if selected { 1 } else { 2 },
                 None,
             ));
@@ -641,7 +641,7 @@ fn dense_tree_label_colors_use_aggregate_cpu_for_groups_and_own_cpu_for_pids() {
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Down);
     }
-    app.dense.tree.selected = Some(crate::cpu::RowKey::Process(290376, None));
+    app.dense.tree.selected = Some(crate::process_tree::RowKey::Process(290376, None));
     let buffer = draw(&app);
     let screen = lines(&buffer);
     for (offset, label, expected) in [
@@ -660,4 +660,28 @@ fn dense_tree_label_colors_use_aggregate_cpu_for_groups_and_own_cpu_for_pids() {
             screen[y]
         );
     }
+}
+
+#[test]
+fn dense_paging_and_global_keys_drive_the_shared_tree() {
+    let mut app = app();
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::PageDown);
+    let keys = app.prepare_tree(crate::app::TreeView::Dense);
+    assert!(keys.len() > 1);
+    assert_eq!(app.dense.tree.selected.as_ref(), keys.last());
+    press(&mut app, KeyCode::Home);
+    assert_eq!(app.dense.tree.selected.as_ref(), keys.first());
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.help_active);
+    app.help_active = false;
+    press(&mut app, KeyCode::Char('p'));
+    assert!(app.paused);
+    press(&mut app, KeyCode::Char(','));
+    assert!(app.settings_active);
+    app.settings_active = false;
+    assert!(app.handle_key(KeyEvent::from(KeyCode::Char('q'))));
+    press(&mut app, KeyCode::Char('V'));
+    assert_eq!(app.view_mode, ViewMode::Full);
+    assert_eq!(app.tree_view(), None, "the Overview tab has no tree");
 }

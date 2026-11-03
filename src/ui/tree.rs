@@ -1,8 +1,8 @@
 //! Branch connectors for a visible depth-first process tree.
 
-use crate::cpu::CpuRow;
+use crate::process_tree::TreeRow;
 
-pub(crate) fn icon(row: &CpuRow<'_>, expanded: bool) -> char {
+pub(crate) fn icon(row: &TreeRow<'_>, expanded: bool) -> char {
     if row.icon == '\u{f07b}' && expanded {
         '\u{f07c}'
     } else {
@@ -10,7 +10,7 @@ pub(crate) fn icon(row: &CpuRow<'_>, expanded: bool) -> char {
     }
 }
 
-pub(crate) fn prefixes(rows: &[CpuRow<'_>]) -> Vec<String> {
+pub(crate) fn prefixes(rows: &[TreeRow<'_>]) -> Vec<String> {
     from_depths(&rows.iter().map(|row| row.depth).collect::<Vec<_>>())
         .into_iter()
         .zip(rows)

@@ -20,12 +20,12 @@ fn directory_groups_combine_different_applications_and_owners() {
     assert_eq!(grouped.len(), 2);
     let directory = grouped.iter().find(|g| g.label == "/work/scratch").unwrap();
     assert_eq!(
-        (directory.members.len(), directory.cpu_pct),
+        (directory.members.len(), directory.totals.cpu_pct),
         (2, Some(30.0))
     );
     let history = GroupTotals::new(&snap);
     assert_eq!(history.get(GroupMode::Project, &directory.key), 30.0);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(directory.key.clone()));
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
     let applications: Vec<_> = visible.iter().filter(|r| r.depth == 1).collect();
@@ -37,9 +37,12 @@ fn directory_groups_combine_different_applications_and_owners() {
         ["node", "pi"]
     );
     assert!(applications.iter().all(|r| r.process.is_some()));
-    assert_eq!(applications.iter().map(|r| r.mem_rss).sum::<u64>(), 3072);
+    assert_eq!(
+        applications.iter().map(|r| r.totals.mem_rss).sum::<u64>(),
+        3072
+    );
     let root = visible.iter().find(|r| r.label == "/work/scratch").unwrap();
-    assert_eq!(root.mem_rss, 3072);
+    assert_eq!(root.totals.mem_rss, 3072);
     let single = visible.iter().find(|r| r.label == "/work/another").unwrap();
     assert_eq!(single.depth, 0);
     assert!(single.process.is_none());
@@ -202,7 +205,7 @@ fn git_projects_combine_working_subdirectories_under_the_checkout() {
         ),
         (1, "acme/web", 4)
     );
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
     let directories: Vec<_> = visible.iter().filter(|r| r.depth == 1).collect();
@@ -214,7 +217,7 @@ fn git_projects_combine_working_subdirectories_under_the_checkout() {
         ["/work/main"]
     );
     assert_eq!(directories.iter().map(|r| r.count).sum::<usize>(), 4);
-    assert_eq!(directories[0].cpu_pct, Some(4.0));
+    assert_eq!(directories[0].totals.cpu_pct, Some(4.0));
     state.expanded.insert(directories[0].key.clone());
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
     assert_eq!(
@@ -266,8 +269,8 @@ fn local_repositories_with_matching_names_share_a_group_and_keep_their_checkouts
             )
         })
         .unwrap();
-    assert_eq!((local.members.len(), local.cpu_pct), (3, Some(6.0)));
-    let mut state = CpuState::default();
+    assert_eq!((local.members.len(), local.totals.cpu_pct), (3, Some(6.0)));
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(local.key.clone()));
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
     let root = visible
@@ -275,7 +278,7 @@ fn local_repositories_with_matching_names_share_a_group_and_keep_their_checkouts
         .find(|row| row.key == RowKey::Group(local.key.clone()))
         .unwrap();
     assert_eq!(
-        (root.label.as_str(), root.count, root.mem_rss),
+        (root.label.as_str(), root.count, root.totals.mem_rss),
         ("engine-dj-app", 3, 6 * 1024)
     );
     let checkouts: Vec<_> = visible.iter().filter(|row| row.depth == 1).collect();
@@ -287,8 +290,8 @@ fn local_repositories_with_matching_names_share_a_group_and_keep_their_checkouts
         [("/projects/engine-dj-app", 2), ("/synced/engine-dj-app", 1)]
     );
     assert_eq!(
-        checkouts.iter().map(|row| row.mem_rss).sum::<u64>(),
-        root.mem_rss
+        checkouts.iter().map(|row| row.totals.mem_rss).sum::<u64>(),
+        root.totals.mem_rss
     );
     state.expanded.insert(checkouts[1].key.clone());
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
@@ -325,10 +328,10 @@ fn helpers_use_their_own_directories_and_preserve_ancestry_inside_a_directory() 
     assert_eq!(grouped.len(), 3);
     let directory = grouped.iter().find(|g| g.label == "/work/helper").unwrap();
     assert_eq!(
-        (directory.members.len(), directory.cpu_pct),
+        (directory.members.len(), directory.totals.cpu_pct),
         (2, Some(11.0))
     );
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(directory.key.clone()));
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
     let apps: Vec<_> = visible.iter().filter(|r| r.depth == 1).collect();
@@ -363,7 +366,7 @@ fn application_expansion_is_independent_in_each_directory_and_survives_reorderin
         in_directory(4, "/bin/node", Some("/work/beta"), 8.0),
     ]);
     let grouped = groups(&snap, GroupMode::Project);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state
         .expanded
         .extend(grouped.iter().map(|g| RowKey::Group(g.key.clone())));
@@ -378,7 +381,7 @@ fn application_expansion_is_independent_in_each_directory_and_survives_reorderin
     snap.procs[2].cpu_pct = 160.0;
     let grouped = groups(&snap, GroupMode::Project);
     let later = rows(&snap, GroupMode::Project, &grouped, &state);
-    assert_eq!(later[selected_index(&later, &state)].key, selected);
+    assert_eq!(later[state.selected_index(&later)].key, selected);
     assert_eq!(later[0].label, "/work/beta");
     let leaves: Vec<_> = later
         .iter()
@@ -429,10 +432,10 @@ fn checkout_sorting_uses_displayed_home_paths_and_cpu_bands() {
     procs[1].project = Some(project("github.com", "/a-checkout"));
     let mut snap = snapshot(procs);
     let grouped = groups(&snap, GroupMode::Project);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
-    let paths = |rows: &[CpuRow<'_>]| {
+    let paths = |rows: &[TreeRow<'_>]| {
         rows.iter()
             .filter(|r| r.depth == 1)
             .map(|r| r.label.clone())

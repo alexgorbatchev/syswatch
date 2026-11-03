@@ -2,11 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use super::{
-    machine_pct, ownership::Ownership, process_row, system_only, usage_order, CpuGroup, CpuRow,
-    CpuState, GroupKey, RowKey,
-};
-use crate::collect::{ProcTick, Snapshot};
+use super::{system_only, usage_order, Build, GroupKey, RowKey, Totals, TreeGroup, TreeRow};
+use crate::collect::ProcTick;
 
 pub(super) fn infrastructure(p: &ProcTick) -> bool {
     let name = p
@@ -22,11 +19,9 @@ pub(super) fn infrastructure(p: &ProcTick) -> bool {
 }
 
 pub(super) fn append<'a>(
-    rows: &mut Vec<CpuRow<'a>>,
-    snap: &Snapshot,
-    group: &CpuGroup<'a>,
-    state: &CpuState,
-    ownership: &Ownership<'a>,
+    rows: &mut Vec<TreeRow<'a>>,
+    build: &Build<'a, '_>,
+    group: &TreeGroup<'a>,
 ) {
     let mut containers: BTreeMap<&str, Vec<&ProcTick>> = BTreeMap::new();
     let mut children = Vec::new();
@@ -34,17 +29,16 @@ pub(super) fn append<'a>(
         if let Some(id) = p.docker_container.as_deref() {
             containers.entry(id).or_default().push(p);
         } else {
-            children.push(process_row(snap, p, ownership.owner(p), &group.key, 1));
+            children.push(build.process_row(p, &group.key, 1));
         }
     }
     for (id, members) in containers {
-        children.push(CpuRow {
+        children.push(TreeRow {
             key: RowKey::Container(id.into()),
             label: format!("container {}", id.chars().take(12).collect::<String>()),
             icon: '\u{e7b0}',
             depth: 1,
-            cpu_pct: machine_pct(snap, members.iter().map(|p| p.cpu_pct.max(0.0)).sum()),
-            mem_rss: members.iter().map(|p| p.mem_rss).sum(),
+            totals: Totals::of(build.snap, members.iter().copied()),
             count: members.len(),
             process: None,
             owner: None,
@@ -55,11 +49,11 @@ pub(super) fn append<'a>(
     children.sort_by(|a, b| {
         system_only(&a.members)
             .cmp(&system_only(&b.members))
-            .then_with(|| usage_order(a.cpu_pct, &a.label, b.cpu_pct, &b.label))
+            .then_with(|| usage_order(build.metric, &a.totals, &a.label, &b.totals, &b.label))
             .then_with(|| a.process.map(|p| p.pid).cmp(&b.process.map(|p| p.pid)))
     });
     for row in children {
-        let expanded = state.expanded.contains(&row.key);
+        let expanded = build.state.expanded.contains(&row.key);
         let members = if expanded && row.process.is_none() {
             row.members.clone()
         } else {
@@ -67,13 +61,7 @@ pub(super) fn append<'a>(
         };
         rows.push(row);
         for p in members {
-            rows.push(process_row(
-                snap,
-                p,
-                ownership.owner(p),
-                &GroupKey::Docker,
-                2,
-            ));
+            rows.push(build.process_row(p, &GroupKey::Docker, 2));
         }
     }
 }

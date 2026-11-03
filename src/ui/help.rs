@@ -81,7 +81,7 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
-        title: "CPU tab",
+        title: "Process tree — CPU, Memory, Procs",
         rows: &[
             Row {
                 keys: "b",
@@ -95,6 +95,15 @@ const GROUPS: &[Group] = &[
                 keys: "Enter",
                 label: "Expand / collapse selected group or checkout",
             },
+            Row {
+                keys: "",
+                label: "b also regroups the Overview and Power summaries",
+            },
+        ],
+    },
+    Group {
+        title: "CPU tab",
+        rows: &[
             Row {
                 keys: "c",
                 label: "Expand / collapse core activity",
@@ -186,7 +195,7 @@ const GROUPS: &[Group] = &[
         rows: &[
             Row {
                 keys: "/ or f",
-                label: "Filter the table (case-insensitive substring)",
+                label: "Filter by name, command or user; Procs and Memory keep whole groups",
             },
             Row {
                 keys: "Enter",
@@ -205,10 +214,6 @@ const GROUPS: &[Group] = &[
     Group {
         title: "Procs tab",
         rows: &[
-            Row {
-                keys: "↑ / ↓",
-                label: "Move selection",
-            },
             Row {
                 keys: "s",
                 label: "Cycle sort (cpu / mem / io / start / name / gpu / net)",

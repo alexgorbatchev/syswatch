@@ -1,9 +1,8 @@
 //! Expand owning-tool groups into helper applications and individual PIDs.
 use super::{
-    application, machine_pct, ownership::Ownership, process_row, system_only, usage_order,
-    CpuGroup, CpuRow, CpuState, GroupKey, RowKey,
+    application, system_only, usage_order, Build, GroupKey, RowKey, Totals, TreeGroup, TreeRow,
 };
-use crate::collect::{ProcTick, Snapshot};
+use crate::collect::ProcTick;
 use std::collections::BTreeMap;
 
 struct Branch<'a> {
@@ -17,13 +16,11 @@ struct Branch<'a> {
 }
 
 pub(super) fn append<'a>(
-    rows: &mut Vec<CpuRow<'a>>,
-    snap: &Snapshot,
-    group: &CpuGroup<'a>,
+    rows: &mut Vec<TreeRow<'a>>,
+    build: &Build<'a, '_>,
+    group: &TreeGroup<'a>,
     context: &RowKey,
     depth: usize,
-    state: &CpuState,
-    ownership: &Ownership<'a>,
 ) {
     let mut branches = vec![Branch {
         application: group.key.clone(),
@@ -35,7 +32,7 @@ pub(super) fn append<'a>(
         children: BTreeMap::new(),
     }];
     for &p in &group.members {
-        let ancestry = ownership.branch(p);
+        let ancestry = build.ownership.branch(p);
         let mut previous = application(ancestry[0]).0;
         let mut index = 0;
         for ancestor in ancestry.into_iter().skip(1) {
@@ -76,71 +73,54 @@ pub(super) fn append<'a>(
         branches[index].direct.push(p);
     }
 
-    let mut pending = entries(snap, &branches, 0, context, depth, ownership);
+    let mut pending = entries(build, &branches, 0, context, depth);
     while let Some((row, branch)) = pending.pop() {
-        let expanded = state.expanded.contains(&row.key);
+        let expanded = build.state.expanded.contains(&row.key);
         let child_depth = row.depth + 1;
         rows.push(row);
         if let Some(branch) = branch.filter(|_| expanded) {
-            pending.extend(entries(
-                snap,
-                &branches,
-                branch,
-                context,
-                child_depth,
-                ownership,
-            ));
+            pending.extend(entries(build, &branches, branch, context, child_depth));
         }
     }
 }
 
 fn entries<'a>(
-    snap: &Snapshot,
+    build: &Build<'a, '_>,
     branches: &[Branch<'a>],
     index: usize,
     context: &RowKey,
     depth: usize,
-    ownership: &Ownership<'a>,
-) -> Vec<(CpuRow<'a>, Option<usize>)> {
+) -> Vec<(TreeRow<'a>, Option<usize>)> {
     let branch = &branches[index];
     let mut entries: Vec<_> = branch
         .direct
         .iter()
-        .map(|p| {
-            (
-                process_row(snap, p, ownership.owner(p), &branch.application, depth),
-                None,
-            )
-        })
+        .map(|p| (build.process_row(p, &branch.application, depth), None))
         .collect();
     for &child in branch.children.values() {
         let branch = &branches[child];
-        let row = CpuRow {
+        let row = TreeRow {
             key: RowKey::Helper(Box::new(context.clone()), branch.path.clone()),
             label: branch.label.clone(),
             icon: branch.icon,
             depth,
-            cpu_pct: machine_pct(
-                snap,
-                branch.members.iter().map(|p| p.cpu_pct.max(0.0)).sum(),
-            ),
-            mem_rss: branch.members.iter().map(|p| p.mem_rss).sum(),
+            totals: Totals::of(build.snap, branch.members.iter().copied()),
             count: branch.members.len(),
             process: None,
             owner: None,
             members: branch.members.clone(),
             group: branch.application.clone(),
         }
-        .collapse_single(ownership);
+        .collapse_single(&build.ownership);
         let expandable = row.process.is_none();
         entries.push((row, expandable.then_some(child)));
     }
     // Reverse order for the iterative depth-first stack; rows retain the same
-    // system/CPU-band/name ordering used by top-level applications.
+    // system/band/name ordering used by top-level applications.
     entries.sort_by(|(a, _), (b, _)| {
         system_only(&b.members)
             .cmp(&system_only(&a.members))
-            .then_with(|| usage_order(b.cpu_pct, &b.label, a.cpu_pct, &a.label))
+            .then_with(|| usage_order(build.metric, &b.totals, &b.label, &a.totals, &a.label))
             .then_with(|| b.process.map(|p| p.pid).cmp(&a.process.map(|p| p.pid)))
     });
     entries

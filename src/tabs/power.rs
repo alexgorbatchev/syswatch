@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{App, Snapshot};
 use crate::collect::{BatteryTick, PowerSource, PowerTick};
+use crate::process_tree::Metric;
 use crate::ui::{
     graph::GraphStyle,
     palette as p,
@@ -47,24 +48,23 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     }
 }
 
-/// Top processes by estimated power — the per-process slice of the
-/// battery-drain question. Measured CPU-rail watts (IOReport) split
-/// by CPU share; `~` marks the attribution as an estimate.
+/// Top consumers by estimated power — the per-process slice of the
+/// battery-drain question, grouped like every other process view. Measured
+/// CPU-rail watts (IOReport) split by CPU share; `~` marks the attribution
+/// as an estimate.
 fn draw_energy(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
-    let block = panel("Top energy consumers (~ measured CPU power × CPU share)");
+    let block = panel(format!(
+        "Top energy consumers (~ measured CPU power × CPU share · {})",
+        app.user_config.cpu_group.label()
+    ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut ranked: Vec<_> = snap
-        .procs
-        .iter()
-        .filter(|p| p.power_w.map(|w| w > 0.005).unwrap_or(false))
+    let ranked: Vec<_> = app
+        .summary_rows(snap, Metric::Power)
+        .into_iter()
+        .filter(|row| row.totals.power_w.is_some_and(|w| w > 0.005))
         .collect();
-    ranked.sort_by(|a, b| {
-        b.power_w
-            .partial_cmp(&a.power_w)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
 
     if ranked.is_empty() {
         f.render_widget(
@@ -79,15 +79,16 @@ fn draw_energy(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     }
 
     let take = inner.height as usize;
+    // Rows within a 1 W band sort by name, so the first row need not be
+    // the largest.
     let max_w = ranked
-        .first()
-        .and_then(|p| p.power_w)
-        .unwrap_or(1.0)
-        .max(0.001);
-    let rendered_rows = ranked.iter().take(take).count();
+        .iter()
+        .filter_map(|row| row.totals.power_w)
+        .fold(0.001, f32::max);
+    let rendered_rows = ranked.len().min(take);
     let mut lines: Vec<Line> = Vec::new();
-    for (i, proc_) in ranked.iter().take(take).enumerate() {
-        let w = proc_.power_w.unwrap_or(0.0);
+    for (i, row) in ranked.iter().take(take).enumerate() {
+        let w = row.totals.power_w.unwrap_or(0.0);
         let row_alpha = if app.user_config.graph_fade {
             crate::ui::graph::row_fade_alpha(i, rendered_rows)
         } else {
@@ -104,8 +105,12 @@ fn draw_energy(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )];
         spans.extend(bar.spans);
+        let detail = match row.process {
+            Some(process) => format!("pid {}", process.pid),
+            None => format!("{} procs", row.count),
+        };
         spans.push(Span::styled(
-            format!("  {} (pid {})", proc_.name, proc_.pid),
+            format!("  {} {} ({detail})", row.icon, row.label),
             Style::default().fg(p::text_primary()),
         ));
         let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
@@ -670,5 +675,79 @@ mod tests {
             text.contains("no throttle"),
             "missing throttle label:\n{text}"
         );
+    }
+
+    #[test]
+    fn energy_ranks_groups_in_watt_bands_and_hides_idle_ones() {
+        let proc = |pid, name: &str, power| crate::collect::ProcTick {
+            pid,
+            name: name.into(),
+            exe: Some(format!("/bin/{name}")),
+            power_w: Some(power),
+            ..Default::default()
+        };
+        let snap = Snapshot {
+            procs: vec![
+                proc(20, "alpha", 0.9),
+                proc(10, "browser", 0.6),
+                proc(11, "browser", 0.6),
+                proc(30, "idle", 0.001),
+            ],
+            ..Default::default()
+        };
+        let app = App::new(
+            crate::app::TabId::Power,
+            crate::config::SyswatchConfig::default(),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 8)).unwrap();
+        terminal
+            .draw(|f| draw_energy(f, f.area(), &app, &snap))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..8)
+            .map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        let browser = rows.iter().position(|l| l.contains("browser (2 procs)"));
+        let alpha = rows.iter().position(|l| l.contains("alpha (pid 20)"));
+        // 1.2 W lands in a higher band than 0.9 W despite sorting by name.
+        assert!(browser.unwrap() < alpha.unwrap(), "{rows:#?}");
+        assert!(rows[browser.unwrap()].contains("~1.20 W"));
+        assert!(!rows.iter().any(|l| l.contains("idle")), "{rows:#?}");
+    }
+
+    #[test]
+    fn energy_warns_on_heavy_draw_and_explains_an_empty_window() {
+        let mut app = App::new(
+            crate::app::TabId::Power,
+            crate::config::SyswatchConfig::default(),
+        );
+        app.user_config.graph_fade = true;
+        let heavy = crate::collect::ProcTick {
+            pid: 7,
+            name: "render".into(),
+            power_w: Some(12.0),
+            ..Default::default()
+        };
+        let render = |snap: &Snapshot| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 6)).unwrap();
+            terminal
+                .draw(|f| draw_energy(f, f.area(), &app, snap))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let buffer = render(&Snapshot {
+            procs: vec![heavy.clone(), crate::collect::ProcTick { pid: 8, ..heavy }],
+            ..Default::default()
+        });
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("~24.00 W"), "{text}");
+        let row = (0..100).find(|&x| buffer[(x, 1)].symbol() == "~").unwrap();
+        assert_eq!(buffer[(row, 1)].fg, p::status_warn());
+
+        let empty = render(&Snapshot::default());
+        let text: String = empty.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("No measurable per-process draw"), "{text}");
     }
 }

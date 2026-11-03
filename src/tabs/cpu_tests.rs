@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::TabId;
+use crate::app::{TabId, TreeView};
 use crate::collect::{CpuTick, ProcTick, ProjectIdentity};
 use crate::config::SyswatchConfig;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -178,7 +178,10 @@ fn procs_column_hides_single_process_counts_but_keeps_group_counts() {
 
 #[test]
 fn owning_tool_expands_helpers_with_pids_and_explains_ownership_in_both_modes() {
-    for mode in [cpu::GroupMode::Application, cpu::GroupMode::Project] {
+    for mode in [
+        process_tree::GroupMode::Application,
+        process_tree::GroupMode::Project,
+    ] {
         let mut app = app();
         let mut snap = app.snap.take().unwrap();
         snap.procs = vec![snap.procs[1].clone()];
@@ -194,13 +197,14 @@ fn owning_tool_expands_helpers_with_pids_and_explains_ownership_in_both_modes() 
         app.user_config.cpu_group = mode;
         for _ in 0..5 {
             let snap = app.displayed_snap().unwrap();
-            let grouped = cpu::groups(snap, mode);
-            let keys: Vec<_> = cpu::rows(snap, mode, &grouped, &app.cpu)
+            let keys: Vec<_> = app
+                .tree_rows(TreeView::Cpu, snap)
+                .1
                 .into_iter()
                 .filter(|row| row.process.is_none())
                 .map(|row| row.key)
                 .collect();
-            app.cpu.expanded.extend(keys);
+            app.cpu.tree.expanded.extend(keys);
         }
         let screen = render(&app, 140, 40);
         assert!(
@@ -222,7 +226,7 @@ fn owning_tool_expands_helpers_with_pids_and_explains_ownership_in_both_modes() 
                 && l.contains("20%")),
             "{screen}"
         );
-        app.cpu.selected = Some(cpu::RowKey::Process(44, None));
+        app.cpu.tree.selected = Some(process_tree::RowKey::Process(44, None));
         let screen = render(&app, 140, 40);
         assert!(screen.contains("Owning tool: pi · PID 43"), "{screen}");
     }
@@ -238,7 +242,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         snap.procs[0].exe = Some("/bin/yazi".into());
         snap.procs[0].pid = 1161583;
         app.snap = Some(snap);
-        app.user_config.cpu_group = cpu::GroupMode::Project;
+        app.user_config.cpu_group = process_tree::GroupMode::Project;
         let before = render(&app, width, 35);
         assert!(
             before.contains("Expand to inspect its processes."),
@@ -301,10 +305,13 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
             expanded.contains("Working directory: /work/web/src"),
             "{expanded}"
         );
-        let expansion = app.cpu.expanded.clone();
+        let expansion = app.cpu.tree.expanded.clone();
         app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert_eq!(app.cpu.expanded, expansion);
-        assert_eq!(app.cpu.selected, Some(cpu::RowKey::Process(1161583, None)));
+        assert_eq!(app.cpu.tree.expanded, expansion);
+        assert_eq!(
+            app.cpu.tree.selected,
+            Some(process_tree::RowKey::Process(1161583, None))
+        );
         assert_eq!(render(&app, width, 35), expanded);
         app.handle_key(KeyEvent::from(KeyCode::PageDown));
         assert!(render(&app, width, 35).contains("github.com/acme/web · /work/web"));
@@ -387,7 +394,10 @@ fn system_rows_are_marked_and_follow_users_even_when_they_use_more_cpu() {
     snap.procs[1].scope = crate::collect::ProcessScope::Tool;
     app.history.push(&snap);
     app.snap = Some(snap);
-    for mode in [cpu::GroupMode::Application, cpu::GroupMode::Project] {
+    for mode in [
+        process_tree::GroupMode::Application,
+        process_tree::GroupMode::Project,
+    ] {
         app.user_config.cpu_group = mode;
         let screen = render(&app, 140, 40);
         let lines: Vec<_> = screen.lines().collect();
@@ -398,7 +408,7 @@ fn system_rows_are_marked_and_follow_users_even_when_they_use_more_cpu() {
         let user = lines
             .iter()
             .position(|l| {
-                l.contains(if mode == cpu::GroupMode::Project {
+                l.contains(if mode == process_tree::GroupMode::Project {
                     "acme/web"
                 } else {
                     "node"
@@ -411,7 +421,7 @@ fn system_rows_are_marked_and_follow_users_even_when_they_use_more_cpu() {
             "{screen}"
         );
     }
-    app.user_config.cpu_group = cpu::GroupMode::Application;
+    app.user_config.cpu_group = process_tree::GroupMode::Application;
     app.handle_key(KeyEvent::from(KeyCode::Down));
     app.handle_key(KeyEvent::from(KeyCode::Enter));
     let screen = render(&app, 140, 40);
@@ -690,4 +700,17 @@ fn deleted_executable_is_muted_and_explained_even_when_selected() {
     assert!(render(&app, 120, 35).contains("unlinked"));
     app.handle_key(KeyEvent::from(KeyCode::Enter));
     assert!(render(&app, 80, 19).contains("unlinked"));
+}
+
+#[test]
+fn assessment_distinguishes_busy_waiting_and_unavailable() {
+    let mut snap = Snapshot::default();
+    snap.cpu.usage_pct = 60.0;
+    assert!(!assessment(&snap).contains("low"));
+    snap.cpu.usage_pct = 95.0;
+    assert!(assessment(&snap).contains("unavailable"));
+    snap.pressure = Some(crate::collect::PressureTick::default());
+    assert!(assessment(&snap).contains("little CPU waiting"));
+    snap.pressure.as_mut().unwrap().cpu_some = 28.0;
+    assert!(assessment(&snap).contains("contention"));
 }

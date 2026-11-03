@@ -42,14 +42,14 @@ fn docker_overrides_locations_and_aggregates_without_absorbing_unrelated_tools()
         let mut pids: Vec<_> = docker.members.iter().map(|p| p.pid).collect();
         pids.sort_unstable();
         assert_eq!(pids, [10, 11, 20, 21, 22, 30]);
-        assert_eq!(docker.cpu_pct, Some(15.0));
+        assert_eq!(docker.totals.cpu_pct, Some(15.0));
         assert_eq!(GroupTotals::new(&snap).get(mode, &docker.key), 15.0);
         assert_eq!(grouped.iter().map(|g| g.members.len()).sum::<usize>(), 8);
         assert_eq!(grouped.len(), 3);
-        let state = CpuState::default();
+        let state = TreeState::default();
         let visible = rows(&snap, mode, &grouped, &state);
         assert_eq!(
-            visible.iter().map(|r| r.mem_rss).sum::<u64>(),
+            visible.iter().map(|r| r.totals.mem_rss).sum::<u64>(),
             8 * 1024 * 1024
         );
         assert!(!grouped.iter().any(|g| g.label == "dev/browser"));
@@ -64,7 +64,7 @@ fn docker_expands_containers_to_unique_pid_leaves_and_preserves_real_parents() {
         .iter()
         .find(|g| g.label == "Docker")
         .expect("Docker root");
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(docker.key.clone()));
     let visible = rows(&snap, GroupMode::Project, &grouped, &state);
     let containers: Vec<_> = visible
@@ -94,7 +94,7 @@ fn docker_expands_containers_to_unique_pid_leaves_and_preserves_real_parents() {
         .unwrap();
     assert_eq!(child.depth, 2);
     assert_eq!(child.process.unwrap().ppid, 20);
-    assert_eq!(child.mem_rss, 1024 * 1024);
+    assert_eq!(child.totals.mem_rss, 1024 * 1024);
 }
 
 #[test]

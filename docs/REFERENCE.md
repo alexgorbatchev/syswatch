@@ -29,7 +29,9 @@ syswatch --record --keep 24h   # unattended recording, no TUI (see below)
 1 2 3 4 5 6 7 8 9   →  Overview / CPU / Mem / Disks / FS / Procs / GPU / Power / Services
 0 - +               →  Net / Timeline / Insights
 Tab / Shift-Tab     →  Cycle tabs
-↑ / ↓               →  Select row (CPU, Procs, Services)
+↑ / ↓               →  Select row (CPU, Memory, Procs, Services)
+Enter               →  Expand / collapse a process-tree row (CPU, Memory, Procs)
+b                   →  Group processes by application / project (Overview, CPU, Memory, Procs, Power)
 s                   →  Cycle sort (Procs, Services)
 / or f              →  Filter the table (Procs, Memory, Services)
 ← / →               →  Scrub session backward / forward
@@ -154,6 +156,50 @@ persist the grouping preference.
 Recordings use format v6 to preserve executable paths, working directories, Git
 attribution, system/tool categories and Docker container membership. This version
 rejects older recording formats; older binaries cannot read v6 recordings.
+
+### Process tree in other views
+
+The Procs, Memory, Overview and Power tabs use the CPU tab's process tree, with
+the same grouping, ownership, Docker, system-last and selection rules. `b` on
+any of those tabs or the CPU tab switches all of them between application and
+project grouping and resets their selection and expansion; open Settings with
+`,` and press `S` to persist it. Dense always groups by project.
+
+Each view ranks rows by its own measure in descending bands, then by the CPU
+tab's name order with repositories first in each band:
+
+| View | Measure | Band |
+|---|---|---|
+| CPU, Overview, Procs `cpu` | Whole-machine CPU | 5% |
+| Procs `mem` | Resident memory (RSS) | 1 GiB |
+| Memory | Footprint, else PSS, else RSS, per process | 1 GiB |
+| Procs `io` | Disk read + write | 1 MiB/s |
+| Procs `gpu` | GPU utilisation | 5% |
+| Procs `net` | Network receive + transmit | 128 KiB/s |
+| Power | Estimated power | 1 W |
+| Procs `start` | Newest member start time, newest first | 1 second |
+| Procs `name` | Name only | — |
+
+Rows within a band stay alphabetical as usage changes, so the first row is not
+necessarily the largest. Group totals sum their members. Optional measures such
+as PSS, swap, network rates, GPU and power sum the members that report them and
+show `—` when none do. Shared memory, peak memory, virtual size and process
+state are not additive and appear only on process rows.
+
+The Procs tab shows whole-machine CPU without decimals, like the CPU tab. Its
+CPU history charts a top-level group's share of the machine, or a process row's
+own per-process samples; intermediate rows have none. The drill-in pane
+describes the selected group or process. The Memory tab gains `↑`/`↓` and
+`Enter` for the tree. In both tabs, the shared filter keeps every top-level
+group containing a process whose name, command or user matches, with all of its
+members and their full totals; the status line reports kept groups and matching
+processes. Overview and Power show collapsed top-level groups only; Power
+omits groups drawing 0.005 W or less. Graph fade applies to the Overview and
+Power summaries but not to the navigable tree tables.
+
+Ownership and grouping are derived once per displayed process table and shared
+by every view and key handler; they are recomputed when a process's identity,
+ancestry, working directory, project, container or classification changes.
 
 ### Dense view
 
@@ -344,6 +390,7 @@ src/
 │   ├── services.rs      launchctl / systemctl
 │   └── ring.rs          Bounded history + nth_back for scrubbing
 ├── insights/            Pure functions over (History, &Snapshot)
+├── process_tree/        Grouping, ownership and ranking shared by every process view
 ├── tabs/                One file per tab; thin renderers over the model
 └── ui/
     ├── chrome.rs        Header, tab bar, footer

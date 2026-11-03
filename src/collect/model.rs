@@ -206,7 +206,9 @@ pub struct GpuTick {
 
 /// Display category based on recognized OS/session helper identities.
 /// Tools include databases, containers and VMs, regardless of owner or unit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessScope {
     System,
@@ -288,7 +290,7 @@ pub struct ProcTick {
 
 /// Repository identity resolved locally from this process's working directory.
 /// Origin credentials are never retained. Empty host denotes a local repository.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProjectIdentity {
     pub host: String,
     pub repo: String,

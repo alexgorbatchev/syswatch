@@ -8,9 +8,9 @@ fn checked_out(pid: u32, exe: &str, checkout: &str) -> ProcTick {
     p
 }
 
-fn expand_all<'a>(snap: &'a Snapshot, mode: GroupMode) -> Vec<CpuRow<'a>> {
+fn expand_all<'a>(snap: &'a Snapshot, mode: GroupMode) -> Vec<TreeRow<'a>> {
     let grouped = groups(snap, mode);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     loop {
         let visible = rows(snap, mode, &grouped, &state);
         let before = state.expanded.len();
@@ -35,7 +35,7 @@ fn singleton_application_is_a_direct_pid_row() {
     assert_eq!(row.process.map(|p| p.pid), Some(1161583));
     assert_eq!(row.key, RowKey::Process(1161583, None));
     assert_eq!(
-        (row.depth, row.count, row.cpu_pct, row.mem_rss),
+        (row.depth, row.count, row.totals.cpu_pct, row.totals.mem_rss),
         (0, 1, Some(10.0), 4096)
     );
     assert_eq!(row.label, "yazi");
@@ -45,13 +45,17 @@ fn singleton_application_is_a_direct_pid_row() {
 fn singleton_project_keeps_separate_expandable_checkout_and_process_rows() {
     let snap = snapshot(vec![checked_out(1161583, "/bin/yazi", "/work/main")]);
     let grouped = groups(&snap, GroupMode::Project);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     let initial = rows(&snap, GroupMode::Project, &grouped, &state);
     assert_eq!(initial.len(), 1);
     assert!(initial[0].process.is_none());
     assert_eq!(initial[0].label, "acme/web");
     assert_eq!(
-        (initial[0].count, initial[0].cpu_pct, initial[0].mem_rss),
+        (
+            initial[0].count,
+            initial[0].totals.cpu_pct,
+            initial[0].totals.mem_rss
+        ),
         (1, Some(10.0), 4096)
     );
     state.expanded.insert(initial[0].key.clone());
@@ -76,7 +80,7 @@ fn singleton_directory_keeps_its_process_beneath_an_expandable_folder() {
     p.project = None;
     let snap = snapshot(vec![p]);
     let grouped = groups(&snap, GroupMode::Project);
-    let initial = rows(&snap, GroupMode::Project, &grouped, &CpuState::default());
+    let initial = rows(&snap, GroupMode::Project, &grouped, &TreeState::default());
     assert_eq!(initial.len(), 1);
     assert_eq!(initial[0].label, "/work/scratch");
     assert!(initial[0].process.is_none());

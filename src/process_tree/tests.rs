@@ -4,6 +4,7 @@ mod docker;
 use crate::collect::{CpuTick, ProcTick, ProcessScope, ProjectIdentity, Snapshot};
 
 mod directories;
+mod metrics;
 mod parents;
 mod singletons;
 
@@ -15,6 +16,19 @@ fn process(pid: u32, exe: &str, cpu: f32) -> ProcTick {
         cpu_pct: cpu,
         ..Default::default()
     }
+}
+
+fn groups(snap: &Snapshot, mode: GroupMode) -> Vec<TreeGroup<'_>> {
+    Tree::new(snap, &Forest::new(snap), mode, Metric::Cpu).groups(None)
+}
+
+fn rows<'a>(
+    snap: &'a Snapshot,
+    mode: GroupMode,
+    groups: &[TreeGroup<'a>],
+    state: &TreeState,
+) -> Vec<TreeRow<'a>> {
+    Tree::new(snap, &Forest::new(snap), mode, Metric::Cpu).rows(groups, state)
 }
 
 fn snapshot(procs: Vec<ProcTick>) -> Snapshot {
@@ -129,7 +143,7 @@ fn system_only_groups_follow_other_groups_before_cpu_banding() {
             node.members.iter().map(|p| p.pid).collect::<Vec<_>>(),
             [8, 7]
         );
-        let mut state = CpuState::default();
+        let mut state = TreeState::default();
         state.expanded.insert(RowKey::Group(node.key.clone()));
         let leaves: Vec<_> = rows(&snap, mode, &grouped, &state)
             .iter()
@@ -171,7 +185,7 @@ fn system_priority_applies_to_projects_checkouts_and_nested_applications() {
     let grouped = groups(&snap, GroupMode::Project);
     assert_eq!(grouped[0].members.len(), 4);
     assert_eq!(grouped[1].label, "acme/system");
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
     for row in rows(&snap, GroupMode::Project, &grouped, &state) {
         if row.depth == 1 {
@@ -202,7 +216,7 @@ fn system_priority_applies_to_projects_checkouts_and_nested_applications() {
     let changed_groups = groups(&changed, GroupMode::Project);
     let changed_rows = rows(&changed, GroupMode::Project, &changed_groups, &state);
     assert_eq!(
-        changed_rows[selected_index(&changed_rows, &state)].key,
+        changed_rows[state.selected_index(&changed_rows)].key,
         expanded[1].key
     );
 }
@@ -226,9 +240,11 @@ fn claude_native_versions_and_helpers_share_the_application_name() {
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].label, "claude");
         assert_eq!(grouped[0].members.len(), 4);
-        assert_eq!(grouped[0].cpu_pct, Some(40.0));
+        assert_eq!(grouped[0].totals.cpu_pct, Some(40.0));
         assert_eq!(
-            rows(&snap, mode, &grouped, &CpuState::default())[0].mem_rss,
+            rows(&snap, mode, &grouped, &TreeState::default())[0]
+                .totals
+                .mem_rss,
             10 * 1024
         );
         assert_eq!(grouped[0].icon, application(&snap.procs[3]).2);
@@ -287,7 +303,7 @@ fn process_rows_use_machine_cpu_bands_and_keep_selection_after_reordering() {
     b.name = "Zebra".into();
     let mut snap = snapshot(vec![a, b]);
     let grouped = groups(&snap, GroupMode::Application);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
     state.selected = Some(RowKey::Process(2, None));
     let first = rows(&snap, GroupMode::Application, &grouped, &state);
@@ -298,7 +314,7 @@ fn process_rows_use_machine_cpu_bands_and_keep_selection_after_reordering() {
             .collect::<Vec<_>>(),
         [3, 2]
     );
-    assert_eq!(selected_index(&first, &state), 2);
+    assert_eq!(state.selected_index(&first), 2);
     snap.procs[1].cpu_pct = 120.0;
     let grouped = groups(&snap, GroupMode::Application);
     let second = rows(&snap, GroupMode::Application, &grouped, &state);
@@ -309,7 +325,7 @@ fn process_rows_use_machine_cpu_bands_and_keep_selection_after_reordering() {
             .collect::<Vec<_>>(),
         [2, 3]
     );
-    assert_eq!(selected_index(&second, &state), 1);
+    assert_eq!(state.selected_index(&second), 1);
 }
 
 #[test]
@@ -321,7 +337,7 @@ fn chrome_helpers_share_an_application_and_cpu_is_machine_normalized() {
     let groups = groups(&snap, GroupMode::Application);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].label, "Google Chrome");
-    assert_eq!(groups[0].cpu_pct, Some(30.0));
+    assert_eq!(groups[0].totals.cpu_pct, Some(30.0));
     assert_eq!(groups[0].members.len(), 2);
     assert_eq!(groups[0].icon, '\u{f268}');
 }
@@ -358,7 +374,7 @@ fn project_groups_merge_worktrees_but_separate_hosts_and_keep_unattributed_apps(
     let groups = groups(&snap, GroupMode::Project);
     assert_eq!(groups.len(), 3);
     assert_eq!(groups[0].label, "acme/web");
-    assert_eq!(groups[0].cpu_pct, Some(30.0));
+    assert_eq!(groups[0].totals.cpu_pct, Some(30.0));
     assert_ne!(groups[0].key, groups[1].key);
     assert_eq!(groups[2].label, "Google Chrome");
     assert_eq!(groups.iter().map(|g| g.members.len()).sum::<usize>(), 4);
@@ -372,7 +388,7 @@ fn repositories_share_an_icon_across_hosts_and_local_checkouts() {
         let snap = snapshot(vec![p]);
         let grouped = groups(&snap, GroupMode::Project);
         assert_eq!(grouped[0].icon, '\u{e725}', "host: {host}");
-        let visible = rows(&snap, GroupMode::Project, &grouped, &CpuState::default());
+        let visible = rows(&snap, GroupMode::Project, &grouped, &TreeState::default());
         assert_eq!(visible[0].icon, '\u{e725}', "host: {host}");
     }
 }
@@ -390,9 +406,11 @@ fn same_application_names_combine_installations_and_owners() {
         let grouped = groups(&snap, mode);
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].members.len(), 3);
-        assert_eq!(grouped[0].cpu_pct, Some(3.0));
+        assert_eq!(grouped[0].totals.cpu_pct, Some(3.0));
         assert_eq!(
-            rows(&snap, mode, &grouped, &CpuState::default())[0].mem_rss,
+            rows(&snap, mode, &grouped, &TreeState::default())[0]
+                .totals
+                .mem_rss,
             2048
         );
         assert_eq!(GroupTotals::new(&snap).get(mode, &grouped[0].key), 3.0);
@@ -427,11 +445,11 @@ fn unavailable_executables_group_same_names_and_unknown_owners_in_both_modes() {
             assert_eq!(grouped.len(), 1, "{name} in {mode:?}");
             assert_eq!(grouped[0].label, name);
             assert_eq!(grouped[0].members.len(), 2);
-            assert_eq!(grouped[0].cpu_pct, Some(30.0));
-            let mut state = CpuState::default();
+            assert_eq!(grouped[0].totals.cpu_pct, Some(30.0));
+            let mut state = TreeState::default();
             state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
             let expanded = rows(&snap, mode, &grouped, &state);
-            assert_eq!(expanded[0].mem_rss, 3072);
+            assert_eq!(expanded[0].totals.mem_rss, 3072);
             assert_eq!(expanded.len(), 3);
             assert_ne!(expanded[1].key, expanded[2].key);
         }
@@ -460,7 +478,7 @@ fn name_fallback_combines_owners_and_known_paths_but_separates_different_names()
         merged.members.iter().map(|p| p.pid).collect::<Vec<_>>(),
         [1, 2, 3, 4, 6]
     );
-    assert_eq!(merged.cpu_pct, Some(5.0));
+    assert_eq!(merged.totals.cpu_pct, Some(5.0));
 }
 
 #[test]
@@ -474,7 +492,7 @@ fn live_and_deleted_installations_share_one_application() {
         let grouped = groups(&snap, GroupMode::Application);
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].label, "node");
-        assert_eq!(grouped[0].cpu_pct, Some(30.0));
+        assert_eq!(grouped[0].totals.cpu_pct, Some(30.0));
     }
 }
 
@@ -493,25 +511,15 @@ fn missing_names_and_executables_remain_individual() {
 }
 
 #[test]
-fn assessment_distinguishes_busy_waiting_and_unavailable() {
-    let mut snap = snapshot(vec![]);
-    snap.cpu.usage_pct = 60.0;
-    assert!(!assessment(&snap).contains("low"));
-    snap.cpu.usage_pct = 95.0;
-    assert!(assessment(&snap).contains("unavailable"));
-    snap.pressure = Some(crate::collect::PressureTick::default());
-    assert!(assessment(&snap).contains("little CPU waiting"));
-    snap.pressure.as_mut().unwrap().cpu_some = 28.0;
-    assert!(assessment(&snap).contains("contention"));
-}
-
-#[test]
 fn missing_core_count_does_not_invent_a_machine_percentage() {
     let snap = Snapshot {
         procs: vec![process(1, "/bin/node", 80.0)],
         ..Default::default()
     };
-    assert_eq!(groups(&snap, GroupMode::Application)[0].cpu_pct, None);
+    assert_eq!(
+        groups(&snap, GroupMode::Application)[0].totals.cpu_pct,
+        None
+    );
 }
 
 #[test]
@@ -581,7 +589,7 @@ fn system_icons_do_not_merge_distinct_services() {
     assert_eq!(grouped[1].icon, '\u{f028}');
     assert_eq!(grouped[2].icon, '\u{f06f3}');
     assert_ne!(grouped[1].key, grouped[2].key);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
     let expanded = rows(&snap, GroupMode::Application, &grouped, &state);
     assert_eq!(expanded[0].icon, grouped[0].icon);
@@ -609,7 +617,7 @@ fn checkout_applications_aggregate_and_expand_independently() {
     }
     let snap = snapshot(procs);
     let grouped = groups(&snap, GroupMode::Project);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     state.expanded.insert(RowKey::Group(grouped[0].key.clone()));
     for row in rows(&snap, GroupMode::Project, &grouped, &state) {
         if row.depth == 1 {
@@ -617,10 +625,13 @@ fn checkout_applications_aggregate_and_expand_independently() {
         }
     }
     let collapsed = rows(&snap, GroupMode::Project, &grouped, &state);
-    assert_eq!(collapsed[0].mem_rss, 10 * 1024);
+    assert_eq!(collapsed[0].totals.mem_rss, 10 * 1024);
     let checkouts: Vec<_> = collapsed.iter().filter(|r| r.depth == 1).collect();
     assert_eq!(
-        checkouts.iter().map(|r| r.mem_rss).collect::<Vec<_>>(),
+        checkouts
+            .iter()
+            .map(|r| r.totals.mem_rss)
+            .collect::<Vec<_>>(),
         [4 * 1024, 6 * 1024]
     );
     let apps: Vec<_> = collapsed.iter().filter(|r| r.depth == 2).collect();
@@ -629,8 +640,8 @@ fn checkout_applications_aggregate_and_expand_independently() {
     assert_eq!(apps.iter().filter(|r| r.process.is_none()).count(), 1);
     let main_node = apps.iter().find(|r| r.count == 2).unwrap();
     assert_eq!(main_node.label, "node");
-    assert_eq!(main_node.cpu_pct, Some(30.0));
-    assert_eq!(main_node.mem_rss, 3 * 1024);
+    assert_eq!(main_node.totals.cpu_pct, Some(30.0));
+    assert_eq!(main_node.totals.mem_rss, 3 * 1024);
     assert_eq!(main_node.icon, application(&snap.procs[0]).2);
     state.expanded.insert(main_node.key.clone());
     let expanded = rows(&snap, GroupMode::Project, &grouped, &state);
@@ -643,9 +654,9 @@ fn checkout_applications_aggregate_and_expand_independently() {
         expanded
             .iter()
             .filter(|r| r.process.is_some())
-            .map(|r| r.mem_rss)
+            .map(|r| r.totals.mem_rss)
             .sum::<u64>(),
-        collapsed[0].mem_rss
+        collapsed[0].totals.mem_rss
     );
     // Application sorting and totals match the normal view for this checkout.
     let local = snapshot(snap.procs[..3].to_vec());
@@ -653,8 +664,8 @@ fn checkout_applications_aggregate_and_expand_independently() {
     let start = apps.iter().position(|r| r.count == 2).unwrap();
     for (nested, app) in apps[start..].iter().zip(normal) {
         assert_eq!(
-            (&nested.label, nested.cpu_pct, nested.count),
-            (&app.label, app.cpu_pct, app.members.len())
+            (&nested.label, nested.totals.cpu_pct, nested.count),
+            (&app.label, app.totals.cpu_pct, app.members.len())
         );
     }
 }

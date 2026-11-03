@@ -4,19 +4,22 @@ use std::collections::HashMap;
 use super::{location, GroupMode};
 use crate::collect::{ProcTick, ProcessScope, Snapshot};
 
-pub(super) struct Ownership<'a> {
-    procs: &'a [ProcTick],
+/// Owned parent and owner links, cached alongside a snapshot's grouping.
+pub(super) struct OwnershipIndex {
     indices: HashMap<u32, usize>,
     parents: Vec<Option<usize>>,
     owners: Vec<usize>,
 }
 
-impl<'a> Ownership<'a> {
-    pub fn new(snap: &'a Snapshot) -> Self {
-        Self::in_mode(snap, GroupMode::Application)
-    }
+/// An [`OwnershipIndex`] read against the snapshot it was built from.
+#[derive(Clone, Copy)]
+pub(super) struct Ownership<'s, 'i> {
+    procs: &'s [ProcTick],
+    index: &'i OwnershipIndex,
+}
 
-    pub fn in_mode(snap: &'a Snapshot, mode: GroupMode) -> Self {
+impl OwnershipIndex {
+    pub fn new(snap: &Snapshot, mode: GroupMode) -> Self {
         let procs = &snap.procs;
         let indices: HashMap<_, _> = procs.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
         let mut parents: Vec<_> = procs
@@ -68,23 +71,35 @@ impl<'a> Ownership<'a> {
             .map(|(i, owner)| owner.unwrap_or(i))
             .collect();
         Self {
-            procs,
             indices,
             parents,
             owners,
         }
     }
 
-    pub fn owner(&self, p: &ProcTick) -> &'a ProcTick {
-        &self.procs[self.owners[self.indices[&p.pid]]]
+    pub fn read<'s, 'i>(&'i self, snap: &'s Snapshot) -> Ownership<'s, 'i> {
+        Ownership {
+            procs: &snap.procs,
+            index: self,
+        }
+    }
+}
+
+impl<'s> Ownership<'s, '_> {
+    pub fn position(&self, p: &ProcTick) -> usize {
+        self.index.indices[&p.pid]
     }
 
-    pub fn branch(&self, p: &ProcTick) -> Vec<&'a ProcTick> {
-        let mut index = self.indices[&p.pid];
-        let owner = self.owners[index];
+    pub fn owner(&self, p: &ProcTick) -> &'s ProcTick {
+        &self.procs[self.index.owners[self.position(p)]]
+    }
+
+    pub fn branch(&self, p: &ProcTick) -> Vec<&'s ProcTick> {
+        let mut index = self.position(p);
+        let owner = self.index.owners[index];
         let mut path = vec![&self.procs[index]];
         while index != owner {
-            let Some(parent) = self.parents[index] else {
+            let Some(parent) = self.index.parents[index] else {
                 break;
             };
             index = parent;

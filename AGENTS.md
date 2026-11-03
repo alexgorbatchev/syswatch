@@ -68,9 +68,11 @@ target: understand which projects and tools consume resources, including helpers
 
 - Read applicable skills and inspect source, dependencies, and repository state
   before editing. Ground implementation and completion claims in tool evidence.
-- Reuse `src/cpu.rs` and `src/cpu/` for grouping, sorting, ownership, and stable
-  row identities. Keep Dense rendering in `src/ui/dense/`; avoid a separate
-  grouping implementation that drifts from Full.
+- Reuse `src/process_tree.rs` and `src/process_tree/` for grouping, ranking,
+  ownership, and stable row identities in every process view. Build a view's
+  rows through `App::tree_rows` so drawing and key handling agree. Keep Dense
+  rendering in `src/ui/dense/`; avoid a separate grouping implementation that
+  drifts between views.
 - Keep grouping snapshot-based so replay and timeline scrubbing agree with live
   views. Persist new attribution metadata in recordings, and version incompatible
   postcard schema changes explicitly.

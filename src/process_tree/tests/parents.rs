@@ -12,9 +12,9 @@ fn child(pid: u32, ppid: u32, exe: &str, cpu: f32) -> ProcTick {
 fn expand_all<'a>(
     snap: &'a Snapshot,
     mode: GroupMode,
-    grouped: &[CpuGroup<'a>],
-) -> Vec<CpuRow<'a>> {
-    let mut state = CpuState::default();
+    grouped: &[TreeGroup<'a>],
+) -> Vec<TreeRow<'a>> {
+    let mut state = TreeState::default();
     loop {
         let visible = rows(snap, mode, grouped, &state);
         let before = state.expanded.len();
@@ -49,7 +49,7 @@ fn owning_tool_includes_descendants_and_keeps_unrelated_runtimes_separate() {
     assert_eq!(grouped.len(), 2);
     let pi = grouped.iter().find(|g| g.label == "pi").unwrap();
     assert_eq!(pi.members.len(), 6);
-    assert_eq!(pi.cpu_pct, Some(21.0));
+    assert_eq!(pi.totals.cpu_pct, Some(21.0));
     let node = grouped.iter().find(|g| g.label == "node").unwrap();
     assert_eq!(
         node.members.iter().map(|p| p.pid).collect::<Vec<_>>(),
@@ -62,8 +62,11 @@ fn owning_tool_includes_descendants_and_keeps_unrelated_runtimes_separate() {
         .collect();
     assert_eq!(helpers.len(), 1);
     let node = helpers.iter().find(|r| r.label == "node").unwrap();
-    assert_eq!((node.depth, node.count, node.cpu_pct), (1, 4, Some(19.0)));
-    assert_eq!(node.mem_rss, 101 + 102 + 103 + 201);
+    assert_eq!(
+        (node.depth, node.count, node.totals.cpu_pct),
+        (1, 4, Some(19.0))
+    );
+    assert_eq!(node.totals.mem_rss, 101 + 102 + 103 + 201);
     let git = visible.iter().find(|r| r.label == "git").unwrap();
     assert_eq!((git.depth, git.count), (2, 1));
     assert_eq!(git.process.unwrap().pid, 103);
@@ -77,7 +80,7 @@ fn owning_tool_includes_descendants_and_keeps_unrelated_runtimes_separate() {
         visible
             .iter()
             .filter(|r| r.depth == 0)
-            .map(|r| r.mem_rss)
+            .map(|r| r.totals.mem_rss)
             .sum::<u64>(),
         snap.procs.iter().map(|p| p.mem_rss).sum::<u64>()
     );
@@ -253,7 +256,7 @@ fn project_view_places_helpers_by_their_own_checkout_or_missing_location() {
     assert_eq!(grouped.len(), 3);
     let main = grouped.iter().find(|g| g.label == "acme/web").unwrap();
     assert_eq!(
-        (main.label.as_str(), main.members.len(), main.cpu_pct),
+        (main.label.as_str(), main.members.len(), main.totals.cpu_pct),
         ("acme/web", 3, Some(3.0))
     );
     let visible = expand_all(&snap, GroupMode::Project, &grouped);
@@ -306,11 +309,11 @@ fn ownership_updates_on_reparenting_without_rewriting_past_totals_or_selection_k
     snap.procs[1].ppid = 0;
     let grouped = groups(&snap, GroupMode::Application);
     let expanded = expand_all(&snap, GroupMode::Application, &grouped);
-    let state = CpuState {
+    let state = TreeState {
         selected: Some(selected.clone()),
         ..Default::default()
     };
-    assert_eq!(expanded[selected_index(&expanded, &state)].key, selected);
+    assert_eq!(expanded[state.selected_index(&expanded)].key, selected);
     assert_eq!(
         GroupTotals::new(&snap).get(GroupMode::Application, &key),
         1.0
@@ -331,7 +334,7 @@ fn helper_groups_keep_expansion_and_selection_when_cpu_moves_within_a_band() {
         child(202, 200, "/bin/alpha", 0.0),
     ]);
     let grouped = groups(&snap, GroupMode::Application);
-    let mut state = CpuState::default();
+    let mut state = TreeState::default();
     for group in &grouped {
         state.expanded.insert(RowKey::Group(group.key.clone()));
     }
@@ -352,7 +355,7 @@ fn helper_groups_keep_expansion_and_selection_when_cpu_moves_within_a_band() {
     snap.procs[2].cpu_pct = 112.0;
     let grouped = groups(&snap, GroupMode::Application);
     let later = rows(&snap, GroupMode::Application, &grouped, &state);
-    assert_eq!(later[selected_index(&later, &state)].key, selected);
+    assert_eq!(later[state.selected_index(&later)].key, selected);
     assert_eq!(
         later
             .iter()

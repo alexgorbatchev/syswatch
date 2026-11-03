@@ -2,7 +2,7 @@ use ratatui::{layout::Rect, Frame};
 
 use crate::app::{App, Snapshot, TabId};
 
-mod cpu;
+pub(crate) mod cpu;
 pub(crate) use cpu::detail_line_count as cpu_detail_line_count;
 mod disks;
 mod fs;

@@ -6,7 +6,8 @@ use super::{
     paint, short_cmd, truncate, App, Buffer, Color, Layout, Modifier, Ramps, Rect, Series,
     Snapshot, Style, Theme,
 };
-use crate::cpu::{self, CpuRow, GroupMode};
+use crate::app::TreeView;
+use crate::process_tree::{self, GroupMode, TreeRow};
 use crate::ui::widgets::human_bytes;
 use ratatui::text::{Line, Span};
 
@@ -23,7 +24,7 @@ struct Columns {
 }
 
 impl Columns {
-    fn new(inner: Rect, rows: &[CpuRow<'_>]) -> Self {
+    fn new(inner: Rect, rows: &[TreeRow<'_>]) -> Self {
         let pid_width = rows
             .iter()
             .filter_map(|row| row.process.map(|proc| proc.pid.to_string().len()))
@@ -65,10 +66,9 @@ pub(super) fn draw(
     if layout.procs.width == 0 || layout.procs.height == 0 {
         return;
     }
-    let groups = cpu::groups(snap, GroupMode::Project);
-    let rows = cpu::rows(snap, GroupMode::Project, &groups, &app.dense.tree);
+    let (groups, rows) = app.tree_rows(TreeView::Dense, snap);
     let prefixes = crate::ui::tree::prefixes(&rows);
-    let selected = cpu::selected_index(&rows, &app.dense.tree);
+    let selected = app.dense.tree.selected_index(&rows);
     let visible = layout.visible_procs().max(1);
     let first = app.dense.scroll.follow(selected, rows.len(), visible);
     let last = (first + visible).min(rows.len());
@@ -176,8 +176,8 @@ pub(super) fn draw(
             prefixes[index],
             crate::ui::tree::icon(row, app.dense.tree.expanded.contains(&row.key))
         )))
-        .style(Style::default().fg(label_color(row.cpu_pct, theme, muted)));
-        if let (cpu::RowKey::Container(_), Some((label, id))) =
+        .style(Style::default().fg(label_color(row.totals.cpu_pct, theme, muted)));
+        if let (process_tree::RowKey::Container(_), Some((label, id))) =
             (&row.key, row.label.split_once(' '))
         {
             name.spans.push(Span::raw(format!("{label} ")));
@@ -186,7 +186,7 @@ pub(super) fn draw(
         } else {
             name.spans.push(Span::raw(&row.label));
         }
-        if cpu::system_only(&row.members) {
+        if process_tree::system_only(&row.members) {
             name.spans.push(Span::styled(
                 " [system]",
                 Style::default().fg(muted).add_modifier(Modifier::DIM),
@@ -212,6 +212,7 @@ pub(super) fn draw(
             );
         }
         let cpu = row
+            .totals
             .cpu_pct
             .map(|pct| format!("{pct:.0}%"))
             .unwrap_or_else(|| "n/a".into());
@@ -220,20 +221,20 @@ pub(super) fn draw(
             cols.cpu + 4,
             y,
             &cpu,
-            Style::default().fg(cpu_color(row.cpu_pct, theme, muted)),
+            Style::default().fg(cpu_color(row.totals.cpu_pct, theme, muted)),
         );
         paint::put_right(
             buf,
             cols.mem + 9,
             y,
-            &human_bytes(row.mem_rss),
-            Style::default().fg(if row.mem_rss < 1024 * 1024 * 1024 {
+            &human_bytes(row.totals.mem_rss),
+            Style::default().fg(if row.totals.mem_rss < 1024 * 1024 * 1024 {
                 muted
             } else {
                 ramps.secondary.mid()
             }),
         );
-        if cols.spark_width >= 6 && row.depth == 0 && row.cpu_pct.is_some() {
+        if cols.spark_width >= 6 && row.depth == 0 && row.totals.cpu_pct.is_some() {
             let mut values: Vec<u64> = (app.scrub_offset
                 ..app.scrub_offset + cols.spark_width as usize)
                 .map_while(|offset| app.history.cpu_groups.nth_back(offset))
@@ -278,10 +279,10 @@ fn cpu_color(pct: Option<f32>, theme: &Theme, muted: Color) -> Color {
     }
 }
 
-fn details(buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme, row: &CpuRow<'_>) {
+fn details(buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme, row: &TreeRow<'_>) {
     paint::put(buf, inner.x + 1, y, "↳", Style::default().fg(theme.brand));
     let container = match &row.key {
-        cpu::RowKey::Container(id) => Some(id.as_str()),
+        process_tree::RowKey::Container(id) => Some(id.as_str()),
         _ => row.process.and_then(|p| p.docker_container.as_deref()),
     }
     .map(|id| format!("container {id} · "))
@@ -302,12 +303,18 @@ fn details(buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme, row: &CpuRow<'_
         let owner = row
             .owner
             .filter(|owner| owner.pid != proc.pid)
-            .map(|owner| format!(" · tool {} ({})", cpu::application(owner).1, owner.pid))
+            .map(|owner| {
+                format!(
+                    " · tool {} ({})",
+                    process_tree::application(owner).1,
+                    owner.pid
+                )
+            })
             .unwrap_or_default();
         let cwd = proc
             .cwd
             .as_deref()
-            .map(cpu::display_path)
+            .map(process_tree::display_path)
             .unwrap_or_else(|| "·".into());
         (
             summary,
@@ -329,7 +336,7 @@ fn details(buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme, row: &CpuRow<'_
             .members
             .iter()
             .filter_map(|proc| proc.exe.as_deref())
-            .map(cpu::display_path)
+            .map(process_tree::display_path)
             .collect();
         (
             format!(

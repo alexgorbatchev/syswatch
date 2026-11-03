@@ -881,7 +881,9 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_owning_tools_and_reparented_helper_totals() {
-        use crate::cpu::{groups, GroupMode};
+        use crate::process_tree::{Forest, GroupMode, Metric, Tree};
+        let groups =
+            |snap, mode| Tree::new(snap, &Forest::new(snap), mode, Metric::Cpu).groups(None);
         std::fs::create_dir_all(".tmp").unwrap();
         let dir = tempfile::tempdir_in(".tmp").unwrap();
         let path = dir.path().join("parents.swr");
@@ -909,7 +911,7 @@ mod tests {
             (
                 before.len(),
                 before[0].label.as_str(),
-                before[0].cpu_pct,
+                before[0].totals.cpu_pct,
                 before[0].members.len()
             ),
             (1, "pi", Some(11.0), 2)
@@ -917,14 +919,21 @@ mod tests {
         let after = groups(&decoded[1], GroupMode::Application);
         assert_eq!(after.len(), 2);
         assert_eq!(
-            after.iter().find(|g| g.label == "pi").unwrap().cpu_pct,
+            after
+                .iter()
+                .find(|g| g.label == "pi")
+                .unwrap()
+                .totals
+                .cpu_pct,
             Some(1.0)
         );
     }
 
     #[test]
     fn round_trip_preserves_docker_membership_changes_and_project_override() {
-        use crate::cpu::{groups, GroupMode};
+        use crate::process_tree::{Forest, GroupMode, Metric, Tree};
+        let groups =
+            |snap, mode| Tree::new(snap, &Forest::new(snap), mode, Metric::Cpu).groups(None);
         std::fs::create_dir_all(".tmp").unwrap();
         let dir = tempfile::tempdir_in(".tmp").unwrap();
         let path = dir.path().join("containers.swr");
@@ -956,7 +965,7 @@ mod tests {
                     "/data"
                 }
             );
-            assert_eq!(grouped[0].cpu_pct, Some(10.0));
+            assert_eq!(grouped[0].totals.cpu_pct, Some(10.0));
         }
     }
 
@@ -992,7 +1001,16 @@ mod tests {
         assert_eq!(decoded.len(), snapshots.len());
         for (i, (back, original)) in decoded.iter().zip(&snapshots).enumerate() {
             assert_eq!(back.procs[0].scope, original.procs[0].scope);
-            let groups = crate::cpu::groups(back, crate::cpu::GroupMode::Application);
+            let groups = {
+                use crate::process_tree::{Forest, GroupMode, Metric, Tree};
+                Tree::new(
+                    back,
+                    &Forest::new(back),
+                    GroupMode::Application,
+                    Metric::Cpu,
+                )
+                .groups(None)
+            };
             assert_eq!(groups[0].label, if i == 0 { "node" } else { "sshd" });
         }
     }

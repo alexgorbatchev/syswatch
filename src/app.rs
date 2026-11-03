@@ -22,6 +22,9 @@ use crate::collect::{CollectorHandle, Ring};
 use crate::collect::Collector;
 use crate::config::{SyswatchConfig, MAX_TICK_MS, MIN_TICK_MS};
 use crate::insights::{self, Insight};
+use crate::process_tree::{
+    Forest, ForestCache, GroupMode, Metric, RowKey, Step, Tree, TreeGroup, TreeRow, TreeState,
+};
 use crate::tabs;
 use crate::ui::chrome;
 use crate::ui::graph::GraphStyle;
@@ -60,7 +63,7 @@ pub const PROC_CPU_SPARK_LEN: usize = 64;
 pub struct History {
     /// Aggregate CPU usage % (0..100), one sample per tick.
     pub cpu: Ring<f32>,
-    pub cpu_groups: Ring<crate::cpu::GroupTotals>,
+    pub cpu_groups: Ring<crate::process_tree::GroupTotals>,
     /// Memory used / total ratio (0..1).
     pub mem: Ring<f32>,
     /// Swap used in bytes — used by the swap-thrash heuristic.
@@ -177,7 +180,8 @@ impl History {
     pub(crate) fn push(&mut self, snap: &Snapshot) {
         // Mirror the snapshot into the session ring so scrubbing has full data.
         self.session.push(snap.clone());
-        self.cpu_groups.push(crate::cpu::GroupTotals::new(snap));
+        self.cpu_groups
+            .push(crate::process_tree::GroupTotals::new(snap));
         self.cpu.push(snap.cpu.usage_pct);
         let m = if snap.mem.total_bytes > 0 {
             (snap.mem.used_bytes as f32) / (snap.mem.total_bytes as f32)
@@ -361,6 +365,13 @@ impl TabId {
     pub fn supports_filter(&self) -> bool {
         matches!(self, TabId::Procs | TabId::Memory | TabId::Services)
     }
+    /// Tabs that show the shared process tree; `b` switches its grouping.
+    pub fn shows_process_tree(&self) -> bool {
+        matches!(
+            self,
+            TabId::Overview | TabId::Cpu | TabId::Memory | TabId::Procs | TabId::Power
+        )
+    }
     pub fn title(&self) -> &'static str {
         match self {
             TabId::Overview => "Overview",
@@ -437,6 +448,27 @@ impl ProcSort {
         let i = ProcSort::ALL.iter().position(|s| *s == self).unwrap_or(0);
         ProcSort::ALL[(i + 1) % ProcSort::ALL.len()]
     }
+    /// The tree metric this sort ranks groups and processes by.
+    pub fn metric(self) -> Metric {
+        match self {
+            ProcSort::Cpu => Metric::Cpu,
+            ProcSort::Rss => Metric::Rss,
+            ProcSort::Io => Metric::Io,
+            ProcSort::Start => Metric::Start,
+            ProcSort::Name => Metric::Name,
+            ProcSort::Gpu => Metric::Gpu,
+            ProcSort::Net => Metric::Net,
+        }
+    }
+}
+
+/// Screens that navigate the shared process tree, each with its own state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TreeView {
+    Cpu,
+    Procs,
+    Memory,
+    Dense,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,7 +545,7 @@ impl ViewMode {
 }
 
 /// Lite's own view state. Deliberately separate from the full TUI's
-/// `proc_sel` / `filter_*`: the two views have different row sets and
+/// tree states / `filter_*`: the two views have different row sets and
 /// different filter semantics (Lite matches name *or* user), and sharing
 /// them would make toggling views move the other view's cursor.
 #[derive(Debug, Clone, Default)]
@@ -535,7 +567,7 @@ pub struct App {
     /// Lite's selection, filter and alert state.
     pub lite: LiteState,
     /// Dense's own selection. Separate from `lite` and from the full TUI's
-    /// `proc_sel` so cycling views never moves another view's cursor.
+    /// tree states so cycling views never moves another view's cursor.
     pub dense: crate::ui::dense::DenseState,
     /// Terminal area from the last frame. Lite's key handler needs to know
     /// how many rows are visible in order to clamp scrolling, and only the
@@ -544,14 +576,22 @@ pub struct App {
     pub history: History,
     pub snap: Option<Snapshot>,
     pub proc_sort: ProcSort,
-    pub proc_sel: usize,
-    pub cpu: crate::cpu::CpuState,
+    /// The Procs tab's tree selection and expansion.
+    pub procs_tree: TreeState,
+    pub cpu: crate::tabs::cpu::CpuState,
     /// The CPU consumers table's scroll window, moved by the renderer to
-    /// follow `cpu.selected`.
+    /// follow `cpu.tree.selected`.
     pub cpu_scroll: ScrollWindow,
     /// The Procs table's scroll window, moved by the renderer to follow
-    /// `proc_sel`.
+    /// `procs_tree.selected`.
     pub proc_scroll: ScrollWindow,
+    /// The Memory tab's tree selection and expansion.
+    pub memory_tree: TreeState,
+    /// The Memory table's scroll window, moved by the renderer.
+    pub memory_scroll: ScrollWindow,
+    /// Ownership and grouping for the displayed snapshot, shared by every
+    /// process view and key handler instead of rebuilt for each.
+    forests: ForestCache,
     /// Whether the Procs tab shows its drill-in detail pane (which carries the
     /// selected process's started date and other per-proc detail). Toggled
     /// with `d`; off reclaims those rows for the process list (issue #13).
@@ -673,10 +713,13 @@ impl App {
             history: History::new(120),
             snap: None,
             proc_sort: ProcSort::Cpu,
-            proc_sel: 0,
-            cpu: crate::cpu::CpuState::default(),
+            procs_tree: TreeState::default(),
+            cpu: crate::tabs::cpu::CpuState::default(),
             cpu_scroll: ScrollWindow::default(),
             proc_scroll: ScrollWindow::default(),
+            memory_tree: TreeState::default(),
+            memory_scroll: ScrollWindow::default(),
+            forests: ForestCache::default(),
             proc_show_detail: true,
             service_sort: ServiceSort::Name,
             service_sel: 0,
@@ -798,82 +841,126 @@ impl App {
         self.settings_editing = false;
     }
 
-    /// Reconcile stable selection before drawing or handling navigation. A
-    /// singleton can become a group, and an exited PID needs a nearby fallback.
-    pub(crate) fn prepare_dense_rows(&mut self) -> Vec<crate::cpu::RowKey> {
-        use crate::cpu::{self, GroupMode, RowKey};
-        let (keys, selected, members) = self
-            .displayed_snap()
-            .map(|snap| {
-                let groups = cpu::groups(snap, GroupMode::Project);
-                let rows = cpu::rows(snap, GroupMode::Project, &groups, &self.dense.tree);
-                let keys: Vec<_> = rows.iter().map(|row| row.key.clone()).collect();
-                let current = self.dense.tree.selected.as_ref();
-                let exact = current.and_then(|key| keys.iter().position(|row| row == key));
-                let membership = || {
-                    rows.iter().rposition(|row| {
-                        row.members.iter().any(|p| {
-                            let key = RowKey::Process(p.pid, p.start_time);
-                            current == Some(&key) || self.dense.selected_members.contains(&key)
-                        })
-                    })
-                };
-                let nearby = || {
-                    let previous = &self.dense.previous_rows;
-                    let index =
-                        current.and_then(|key| previous.iter().position(|row| row == key))?;
-                    previous[index + 1..]
-                        .iter()
-                        .chain(previous[..index].iter().rev())
-                        .find_map(|key| keys.iter().position(|row| row == key))
-                        .or_else(|| (!keys.is_empty()).then(|| index.min(keys.len() - 1)))
-                };
-                let index = exact.or_else(membership).or_else(nearby).unwrap_or(0);
-                let row = rows.get(index);
-                let selected = row.map(|row| row.key.clone());
-                let members = row
-                    .map(|row| {
-                        row.members
-                            .iter()
-                            .map(|p| RowKey::Process(p.pid, p.start_time))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (keys, selected, members)
-            })
-            .unwrap_or_default();
-        self.dense.tree.selected = selected;
-        self.dense.previous_rows = keys.clone();
-        self.dense.selected_members = members;
-        keys
+    /// The tree the current screen navigates, if any.
+    pub(crate) fn tree_view(&self) -> Option<TreeView> {
+        match self.view_mode {
+            ViewMode::Dense => Some(TreeView::Dense),
+            ViewMode::Lite => None,
+            ViewMode::Full => match self.active {
+                TabId::Cpu => Some(TreeView::Cpu),
+                TabId::Procs => Some(TreeView::Procs),
+                TabId::Memory => Some(TreeView::Memory),
+                _ => None,
+            },
+        }
+    }
+
+    pub(crate) fn tree_state(&self, view: TreeView) -> &TreeState {
+        match view {
+            TreeView::Cpu => &self.cpu.tree,
+            TreeView::Procs => &self.procs_tree,
+            TreeView::Memory => &self.memory_tree,
+            TreeView::Dense => &self.dense.tree,
+        }
+    }
+
+    fn tree_state_mut(&mut self, view: TreeView) -> &mut TreeState {
+        match view {
+            TreeView::Cpu => &mut self.cpu.tree,
+            TreeView::Procs => &mut self.procs_tree,
+            TreeView::Memory => &mut self.memory_tree,
+            TreeView::Dense => &mut self.dense.tree,
+        }
+    }
+
+    pub(crate) fn forest(&self, snap: &Snapshot) -> std::rc::Rc<Forest> {
+        self.forests.get(snap)
+    }
+
+    /// Groups and visible rows exactly as `view` draws them, so moving the
+    /// selection and rendering it can never disagree.
+    pub(crate) fn tree_rows<'s>(
+        &self,
+        view: TreeView,
+        snap: &'s Snapshot,
+    ) -> (Vec<TreeGroup<'s>>, Vec<TreeRow<'s>>) {
+        let (mode, metric, filter) = match view {
+            TreeView::Cpu => (self.user_config.cpu_group, Metric::Cpu, None),
+            TreeView::Procs => (
+                self.user_config.cpu_group,
+                self.proc_sort.metric(),
+                self.filter_active.as_deref(),
+            ),
+            TreeView::Memory => (
+                self.user_config.cpu_group,
+                Metric::Memory,
+                self.filter_active.as_deref(),
+            ),
+            TreeView::Dense => (GroupMode::Project, Metric::Cpu, None),
+        };
+        let forest = self.forest(snap);
+        let tree = Tree::new(snap, &forest, mode, metric);
+        let groups = tree.groups(filter);
+        let rows = tree.rows(&groups, self.tree_state(view));
+        (groups, rows)
+    }
+
+    /// Collapsed top-level groups for the read-only summary panels.
+    pub(crate) fn summary_rows<'s>(&self, snap: &'s Snapshot, metric: Metric) -> Vec<TreeRow<'s>> {
+        let forest = self.forest(snap);
+        let tree = Tree::new(snap, &forest, self.user_config.cpu_group, metric);
+        tree.rows(&tree.groups(None), &TreeState::default())
+    }
+
+    /// Reconcile stable selection before drawing or handling navigation, and
+    /// return the visible row keys.
+    pub(crate) fn prepare_tree(&mut self, view: TreeView) -> Vec<RowKey> {
+        let reconciled = {
+            let rows = self
+                .displayed_snap()
+                .map(|snap| self.tree_rows(view, snap).1)
+                .unwrap_or_default();
+            self.tree_state(view).reconcile(&rows)
+        };
+        self.tree_state_mut(view).apply(reconciled)
+    }
+
+    fn navigate_tree(&mut self, view: TreeView, step: Step) {
+        let keys = self.prepare_tree(view);
+        let before = self.tree_state(view).selected.clone();
+        self.tree_state_mut(view).step(&keys, step);
+        if view == TreeView::Cpu && self.cpu.tree.selected != before {
+            self.cpu.detail_scroll = 0;
+        }
+        // Remember the membership of the row chosen by this key, rather than
+        // the row that was selected before navigation.
+        self.prepare_tree(view);
     }
 
     /// Dense's key surface. Like Lite it advertises every key it answers to in
     /// its own box borders, so this list and those borders must stay in step.
     fn handle_dense_key(&mut self, k: KeyEvent) -> bool {
-        // Resolve the cursor against the same order the table draws, so moving
-        // the selection and rendering it can never disagree.
-        let rows = self.prepare_dense_rows();
-        let count = rows.len();
-        let cur = self
-            .dense
-            .tree
-            .selected
-            .as_ref()
-            .and_then(|key| rows.iter().position(|row| row == key))
-            .unwrap_or(0);
         let visible =
             crate::ui::dense::Layout::with_zoom(self.last_area, self.dense.zoom).visible_procs();
-        let goto = |app: &mut Self, i: usize| {
-            app.dense.tree.selected = rows.get(i).cloned();
-        };
-        match (k.code, k.modifiers) {
+        let step = match (k.code, k.modifiers) {
             (KeyCode::Char('q'), _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
-            (KeyCode::Char('V'), _) | (KeyCode::Char('v'), _) => self.cycle_view(),
-            (KeyCode::Char(','), _) => self.open_settings(),
-            (KeyCode::Char('?'), _) => self.help_active = true,
-            (KeyCode::Char('p'), _) => self.paused = !self.paused,
+            (KeyCode::Char('V'), _) | (KeyCode::Char('v'), _) => {
+                self.cycle_view();
+                None
+            }
+            (KeyCode::Char(','), _) => {
+                self.open_settings();
+                None
+            }
+            (KeyCode::Char('?'), _) => {
+                self.help_active = true;
+                None
+            }
+            (KeyCode::Char('p'), _) => {
+                self.paused = !self.paused;
+                None
+            }
             // The bracketed `┤1├` every box carries in its border is an
             // affordance; zoom is what it promises. Same key toggles back.
             (KeyCode::Char(c @ '1'..='6'), _) => {
@@ -886,41 +973,31 @@ impl App {
                         Some(id)
                     };
                 }
+                None
             }
-            (KeyCode::Esc, _) => self.dense.zoom = None,
+            (KeyCode::Esc, _) => {
+                self.dense.zoom = None;
+                None
+            }
             (KeyCode::Char('t'), _) => {
                 let next = crate::ui::theme::cycle();
                 self.user_config.theme = next.into();
+                None
             }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                if count > 0 {
-                    goto(self, (cur + 1).min(count - 1));
-                }
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => goto(self, cur.saturating_sub(1)),
-            (KeyCode::Home, _) => goto(self, 0),
-            (KeyCode::End, _) => goto(self, count.saturating_sub(1)),
-            (KeyCode::Enter, _) => {
-                if let Some(key) = rows.get(cur) {
-                    if !matches!(key, crate::cpu::RowKey::Process(..))
-                        && !self.dense.tree.expanded.remove(key)
-                    {
-                        self.dense.tree.expanded.insert(key.clone());
-                    }
-                    goto(self, cur);
-                }
-            }
-            (KeyCode::PageDown, _) => {
-                if count > 0 {
-                    goto(self, (cur + visible).min(count - 1));
-                }
-            }
-            (KeyCode::PageUp, _) => goto(self, cur.saturating_sub(visible)),
-            _ => {}
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => Some(Step::Next(1)),
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => Some(Step::Previous(1)),
+            (KeyCode::Home, _) => Some(Step::First),
+            (KeyCode::End, _) => Some(Step::Last),
+            (KeyCode::Enter, _) => Some(Step::Toggle),
+            (KeyCode::PageDown, _) => Some(Step::Next(visible)),
+            (KeyCode::PageUp, _) => Some(Step::Previous(visible)),
+            _ => None,
+        };
+        if let Some(step) = step {
+            self.navigate_tree(TreeView::Dense, step);
+        } else if self.view_mode == ViewMode::Dense {
+            self.prepare_tree(TreeView::Dense);
         }
-        // Remember the membership of the row chosen by this key, rather than
-        // the row that was selected before navigation.
-        self.prepare_dense_rows();
         false
     }
 
@@ -940,7 +1017,8 @@ impl App {
     /// shared across tabs, so changing it invalidates each of their
     /// selections — not just the one currently on screen.
     fn reset_filtered_selection(&mut self) {
-        self.proc_sel = 0;
+        self.procs_tree.clear_selection();
+        self.memory_tree.clear_selection();
         self.service_sel = 0;
     }
 
@@ -1092,10 +1170,15 @@ impl App {
             (KeyCode::Char('+') | KeyCode::Char('='), _) => self.active = TabId::Insights,
             (KeyCode::Tab, _) => self.active = next_tab(self.active),
             (KeyCode::BackTab, _) => self.active = prev_tab(self.active),
-            (KeyCode::Char('b'), _) if self.active == TabId::Cpu => {
+            (KeyCode::Char('b'), _) if self.active.shows_process_tree() => {
                 self.user_config.cpu_group = self.user_config.cpu_group.next();
-                self.cpu.selected = None;
-                self.cpu.expanded.clear();
+                for tree in [
+                    &mut self.cpu.tree,
+                    &mut self.procs_tree,
+                    &mut self.memory_tree,
+                ] {
+                    *tree = TreeState::default();
+                }
                 self.cpu.detail_scroll = 0;
             }
             (KeyCode::Char('c'), _) if self.active == TabId::Cpu => {
@@ -1110,10 +1193,8 @@ impl App {
             }
             (KeyCode::PageUp | KeyCode::PageDown, _) if self.active == TabId::Cpu => {
                 if let Some(snap) = self.displayed_snap() {
-                    let groups = crate::cpu::groups(snap, self.user_config.cpu_group);
-                    let rows =
-                        crate::cpu::rows(snap, self.user_config.cpu_group, &groups, &self.cpu);
-                    let selected = crate::cpu::selected_index(&rows, &self.cpu);
+                    let (_, rows) = self.tree_rows(TreeView::Cpu, snap);
+                    let selected = self.cpu.tree.selected_index(&rows);
                     let max_scroll =
                         crate::tabs::cpu_detail_line_count(rows.get(selected)).saturating_sub(1);
                     self.cpu.detail_scroll = if k.code == KeyCode::PageDown {
@@ -1123,57 +1204,18 @@ impl App {
                     };
                 }
             }
-            (KeyCode::Up | KeyCode::Down | KeyCode::Enter, _) if self.active == TabId::Cpu => {
-                if let Some(snap) = self.displayed_snap() {
-                    let groups = crate::cpu::groups(snap, self.user_config.cpu_group);
-                    let rows =
-                        crate::cpu::rows(snap, self.user_config.cpu_group, &groups, &self.cpu);
-                    let selected = crate::cpu::selected_index(&rows, &self.cpu);
-                    let index = match k.code {
-                        KeyCode::Up => selected.saturating_sub(1),
-                        KeyCode::Down => (selected + 1).min(rows.len().saturating_sub(1)),
-                        _ => selected,
+            (KeyCode::Up | KeyCode::Down | KeyCode::Enter, _) if self.tree_view().is_some() => {
+                if let Some(view) = self.tree_view() {
+                    let step = match k.code {
+                        KeyCode::Up => Step::Previous(1),
+                        KeyCode::Down => Step::Next(1),
+                        _ => Step::Toggle,
                     };
-                    let key = rows.get(index).map(|r| r.key.clone());
-                    if let Some(key) = key {
-                        if self.cpu.selected.as_ref() != Some(&key) {
-                            self.cpu.detail_scroll = 0;
-                        }
-                        if k.code == KeyCode::Enter
-                            && !matches!(key, crate::cpu::RowKey::Process(..))
-                            && !self.cpu.expanded.remove(&key)
-                        {
-                            self.cpu.expanded.insert(key.clone());
-                        }
-                        self.cpu.selected = Some(key);
-                    }
+                    self.navigate_tree(view, step);
                 }
-            }
-            (KeyCode::Up, _) if self.active == TabId::Procs => {
-                self.proc_sel = self.proc_sel.saturating_sub(1);
-            }
-            (KeyCode::Down, _) if self.active == TabId::Procs => {
-                // Clamp against the *filtered* list — netwatch issue #26
-                // taught us not to let selection land on rows the user
-                // can't see.
-                let max = self
-                    .snap
-                    .as_ref()
-                    .map(|s| {
-                        crate::tabs::procs::filtered_sorted(
-                            &s.procs,
-                            self.proc_sort,
-                            self.filter_active.as_deref(),
-                        )
-                        .len()
-                        .saturating_sub(1)
-                    })
-                    .unwrap_or(0);
-                self.proc_sel = (self.proc_sel + 1).min(max);
             }
             (KeyCode::Char('s'), _) if self.active == TabId::Procs => {
                 self.proc_sort = self.proc_sort.next();
-                self.proc_sel = 0;
             }
             (KeyCode::Char('/') | KeyCode::Char('f'), _) if self.active.supports_filter() => {
                 // Enter filter input mode. Pre-fill with the current
@@ -1505,8 +1547,8 @@ pub fn run(opts: Options) -> Result<()> {
         }
 
         if needs_draw {
-            if app.view_mode == ViewMode::Dense {
-                app.prepare_dense_rows();
+            if let Some(view) = app.tree_view() {
+                app.prepare_tree(view);
             }
             // Lite's key handler needs the frame geometry to clamp
             // scrolling, and only the renderer normally sees it.
@@ -2063,7 +2105,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent};
 
         let mut app = App::new(TabId::Procs, SyswatchConfig::default());
-        app.proc_sel = 4;
+        app.procs_tree.selected = Some(RowKey::Process(2, None));
         app.snap = Some(snap_with(vec![proc(1, 10.0), proc(2, 5.0)]));
 
         app.handle_key(KeyEvent::from(KeyCode::Char('L')));
@@ -2075,7 +2117,11 @@ mod tests {
         assert_eq!(app.view_mode, ViewMode::Full);
         assert!(!app.lite.detail_open, "detail should close on leaving Lite");
         assert!(!app.lite.filter_input, "filter input should close too");
-        assert_eq!(app.proc_sel, 4, "the full TUI's cursor must not move");
+        assert_eq!(
+            app.procs_tree.selected,
+            Some(RowKey::Process(2, None)),
+            "the full TUI's cursor must not move"
+        );
         assert_eq!(app.active, TabId::Procs, "nor its tab");
     }
 
@@ -2228,7 +2274,7 @@ mod tests {
 
         press_and_draw(&mut app, KeyCode::Up, 3);
         let after = render_rows(&app, 120, 30);
-        assert_eq!(app.proc_sel, 56);
+        assert_eq!(app.procs_tree.selected, Some(RowKey::Process(1056, None)));
         assert_eq!(
             row_of(&after, " 1059 "),
             Some(last),
@@ -2324,7 +2370,7 @@ mod tests {
         let screen = press(&mut app, KeyCode::Up, 3);
         assert_eq!(
             app.dense.tree.selected,
-            Some(crate::cpu::RowKey::Process(136, None))
+            Some(crate::process_tree::RowKey::Process(136, None))
         );
         assert!(
             screen.contains(&window),
@@ -2476,14 +2522,14 @@ mod tests {
     fn views_do_not_share_a_selection() {
         let mut app = App::new(TabId::Overview, SyswatchConfig::default());
         app.lite.selected = 4;
-        app.dense.tree.selected = Some(crate::cpu::RowKey::Process(9, None));
+        app.dense.tree.selected = Some(crate::process_tree::RowKey::Process(9, None));
         app.cycle_view();
         app.cycle_view();
         app.cycle_view();
         assert_eq!(app.lite.selected, 4);
         assert_eq!(
             app.dense.tree.selected,
-            Some(crate::cpu::RowKey::Process(9, None))
+            Some(crate::process_tree::RowKey::Process(9, None))
         );
     }
 
@@ -2555,15 +2601,17 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_filter_resets_both_table_selections() {
+    fn changing_the_filter_resets_every_table_selection() {
         // The filter is shared, so a stale cursor on the *other* tab is
         // just as out of bounds as one on the tab in view.
         let mut app = App::new(TabId::Services, SyswatchConfig::default());
-        app.proc_sel = 12;
+        app.procs_tree.selected = Some(RowKey::Process(12, None));
+        app.memory_tree.selected = Some(RowKey::Process(12, None));
         app.service_sel = 9;
         press(&mut app, '/');
         press(&mut app, 'x');
-        assert_eq!(app.proc_sel, 0);
+        assert_eq!(app.procs_tree.selected, None);
+        assert_eq!(app.memory_tree.selected, None);
         assert_eq!(app.service_sel, 0);
     }
 

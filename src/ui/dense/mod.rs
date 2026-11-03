@@ -108,10 +108,7 @@ const AX_GRAPH: u16 = AX_TICK + 2;
 #[derive(Debug, Clone, Default)]
 pub struct DenseState {
     /// Project-tree selection and expansion, independent of Full's tree.
-    pub tree: crate::cpu::CpuState,
-    /// Previous visible order and selected membership for process-list churn.
-    pub(crate) previous_rows: Vec<crate::cpu::RowKey>,
-    pub(crate) selected_members: Vec<crate::cpu::RowKey>,
+    pub tree: crate::process_tree::TreeState,
     /// The process table's scroll window, moved by the renderer to follow
     /// the selection.
     pub scroll: ScrollWindow,

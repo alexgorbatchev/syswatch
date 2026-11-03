@@ -2,12 +2,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
 
-use crate::app::{App, Snapshot};
-use crate::collect::ProcTick;
+use crate::app::{App, Snapshot, TreeView};
+use crate::process_tree::{self, TreeGroup, TreeRow};
 use crate::ui::{
     graph::GraphStyle,
     palette as p,
@@ -37,6 +37,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         .constraints(constraints)
         .split(area);
 
+    let (groups, rows) = app.tree_rows(TreeView::Memory, snap);
     let mut row = 0;
     draw_ram_bar(f, v[row], snap, app.graph_style);
     row += 1;
@@ -45,24 +46,36 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         row += 1;
     }
     if show_filter {
-        draw_filter_strip(f, v[row], app, snap);
+        draw_filter_strip(f, v[row], app, snap, &groups);
         row += 1;
     }
-    draw_proc_breakdown(f, v[row], app, snap);
+    draw_proc_breakdown(f, v[row], app, snap, &rows);
 }
 
-/// Filter prompt while typing; match count once applied.
-fn draw_filter_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+/// Filter prompt while typing; kept groups and match count once applied.
+fn draw_filter_strip(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    snap: &Snapshot,
+    groups: &[TreeGroup<'_>],
+) {
     let line = if app.filter_input {
         crate::ui::widgets::filter_input_line(&app.filter_buf)
     } else {
-        let needle = app.filter_active.as_deref().unwrap_or_default();
+        let filter = app.filter_active.as_deref().unwrap_or_default();
+        let needle = filter.to_lowercase();
+        let matching = snap
+            .procs
+            .iter()
+            .filter(|p| process_tree::matches_filter(p, &needle))
+            .count();
+        let members: usize = groups.iter().map(|g| g.members.len()).sum();
         Line::from(Span::styled(
             format!(
-                " {}/{} procs  filter: \"{}\"   / f:edit",
-                filtered_procs(&snap.procs, Some(needle)).len(),
+                " {} groups ({members} procs) · {matching}/{} match \"{filter}\"   / f:edit",
+                groups.len(),
                 snap.procs.len(),
-                needle
             ),
             Style::default().fg(p::brand()),
         ))
@@ -71,21 +84,6 @@ fn draw_filter_strip(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
         Paragraph::new(line).style(Style::default().bg(p::bg())),
         area,
     );
-}
-
-/// Narrow the process list by the shared filter, preserving input order —
-/// the breakdown does its own memory-weighted sort afterwards, so unlike
-/// the Procs tab this must not impose one.
-fn filtered_procs(procs: &[ProcTick], filter: Option<&str>) -> Vec<ProcTick> {
-    let needle = filter.map(|s| s.to_lowercase());
-    procs
-        .iter()
-        .filter(|p| match needle.as_deref() {
-            None => true,
-            Some(n) => crate::tabs::procs::proc_matches(p, n),
-        })
-        .cloned()
-        .collect()
 }
 
 fn draw_ram_bar(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
@@ -194,224 +192,176 @@ fn draw_swap(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) {
     );
 }
 
-/// Per-process memory breakdown. RSS double-counts shared pages, so
-/// where the platform sampler delivered honest accounting we lead with
-/// it: phys_footprint on macOS (Activity Monitor's Memory column),
-/// PSS + private/shared/swap from smaps_rollup on Linux. Detail is
-/// sampled for the top procs by RSS and only for procs the user can
-/// inspect without sudo — rows without it show "—" and fall back to
-/// RSS-based ordering.
-fn draw_proc_breakdown(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
+/// Per-process memory breakdown over the shared process tree. RSS
+/// double-counts shared pages, so where the platform sampler delivered honest
+/// accounting we lead with it: phys_footprint on macOS (Activity Monitor's
+/// Memory column), PSS + private/swap from smaps_rollup on Linux. Detail is
+/// sampled for the top procs by RSS and only for procs the user can inspect
+/// without sudo — rows without it show "—" and rank by RSS instead.
+///
+/// Groups sum footprint, PSS, private and swap over the members that report
+/// them. Shared pages, peaks and virtual sizes overlap between processes, so
+/// only process rows show those.
+fn draw_proc_breakdown(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    snap: &Snapshot,
+    rows: &[TreeRow<'_>],
+) {
     let total_mem = snap.mem.total_bytes.max(1);
 
     // Column sets keyed off what the sampler could actually read this
     // session — same pattern as the procs tab's NET / GPU columns.
     let show_footprint = snap.procs.iter().any(|p| p.mem_footprint.is_some());
     let show_smaps = snap.procs.iter().any(|p| p.mem_pss.is_some());
+    let show_peak = snap.procs.iter().any(|p| p.mem_peak.is_some());
+    let show_virt = !show_footprint && !show_smaps;
 
-    let block = panel(if show_footprint {
-        "Process memory breakdown (footprint = real pressure; rss double-counts shared)"
-    } else if show_smaps {
-        "Process memory breakdown (pss sums to real use; private frees on exit)"
-    } else {
-        "Process memory breakdown (by RSS)"
-    });
+    let block = panel(format!(
+        "{} · {} · system last",
+        if show_footprint {
+            "Process memory (footprint = real pressure; rss double-counts shared)"
+        } else if show_smaps {
+            "Process memory (pss sums to real use; private frees on exit)"
+        } else {
+            "Process memory (by RSS)"
+        },
+        app.user_config.cpu_group.label()
+    ));
     let inner = block.inner(area);
-    f.render_widget(block, area);
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new("No matching processes.")
+                .block(block)
+                .style(Style::default().fg(p::text_muted()).bg(p::bg())),
+            area,
+        );
+        return;
+    }
 
-    // Order by the most honest metric available per row, falling back
-    // to RSS so undetailed rows still rank sensibly.
-    let mut sorted = filtered_procs(&snap.procs, app.filter_active.as_deref());
-    sorted.sort_by_key(|p| std::cmp::Reverse(p.mem_footprint.or(p.mem_pss).unwrap_or(p.mem_rss)));
-    let take = inner.height.saturating_sub(1) as usize;
-
-    let header_style = Style::default()
-        .fg(p::text_muted())
-        .add_modifier(Modifier::BOLD);
-    let mut header: Vec<Span> = vec![
-        Span::styled(format!("{:>7} ", "PID"), header_style),
-        Span::styled(format!("{:<10} ", "USER"), header_style),
-        // Width 5 to match the `{:>5.1}` data cell — see issue #11.
-        Span::styled(format!("{:>5} ", "%MEM"), header_style),
+    let pid_width = rows
+        .iter()
+        .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
+        .max()
+        .unwrap_or(0)
+        .max(3) as u16;
+    let mut header = vec!["Application / project", "Procs", "PID", "%MEM"];
+    let mut widths = vec![
+        Constraint::Min(16),
+        Constraint::Length(5),
+        Constraint::Length(pid_width),
+        Constraint::Length(5),
     ];
     if show_footprint {
-        header.push(Span::styled(format!("{:>10} ", "FOOTPRNT"), header_style));
+        header.push("FOOTPRNT");
     }
     if show_smaps {
-        header.push(Span::styled(format!("{:>10} ", "PSS"), header_style));
-        header.push(Span::styled(format!("{:>10} ", "PRIVATE"), header_style));
-        header.push(Span::styled(format!("{:>10} ", "SHARED"), header_style));
-        header.push(Span::styled(format!("{:>10} ", "SWAP"), header_style));
+        header.extend(["PSS", "PRIVATE", "SHARED", "SWAP"]);
     }
-    let show_peak = snap.procs.iter().any(|p| p.mem_peak.is_some());
     if show_peak {
-        header.push(Span::styled(format!("{:>10} ", "PEAK"), header_style));
+        header.push("PEAK");
     }
-    header.push(Span::styled(format!("{:>10} ", "RSS"), header_style));
-    if !show_footprint && !show_smaps {
-        header.push(Span::styled(format!("{:>10} ", "VIRT"), header_style));
+    header.push("RSS");
+    if show_virt {
+        header.push("VIRT");
     }
-    header.push(Span::styled("COMMAND", header_style));
-    let mut lines: Vec<Line> = vec![Line::from(header)];
+    widths.resize(header.len(), Constraint::Length(10));
 
     // None → "—": the proc exists but detail wasn't readable (other
     // user without sudo) or it ranked below the sampler's top-N cap.
-    let detail = |v: Option<u64>| match v {
-        Some(b) => human_bytes(b),
-        None => "—".into(),
+    let detail = |v: Option<u64>| {
+        Cell::from(v.map(human_bytes).unwrap_or_else(|| "—".into())).style(Style::default().fg(
+            if v.is_some() {
+                p::brand()
+            } else {
+                p::text_muted()
+            },
+        ))
     };
-    let detail_fg = |v: Option<u64>| {
-        if v.is_some() {
-            p::brand()
-        } else {
-            p::text_muted()
-        }
+    // Non-additive measures: blank for groups rather than a misleading sum.
+    let leaf = |row: &TreeRow<'_>, v: fn(&crate::collect::ProcTick) -> Option<u64>| {
+        row.process.map_or_else(|| Cell::from(""), |p| detail(v(p)))
     };
 
-    let rendered_rows = sorted.iter().take(take).count();
-    for (i, proc_) in sorted.iter().take(take).enumerate() {
-        let row_alpha = if app.user_config.graph_fade {
-            crate::ui::graph::row_fade_alpha(i, rendered_rows)
-        } else {
-            1.0
-        };
-        let mut spans = vec![
-            Span::styled(
-                format!("{:>7} ", proc_.pid),
-                Style::default().fg(p::text_primary()),
-            ),
-            Span::styled(
-                format!("{:<10.10} ", proc_.user),
-                Style::default().fg(p::text_muted()),
-            ),
-            Span::styled(
-                format!("{:>5.1} ", mem_pct(proc_.mem_rss, total_mem)),
-                Style::default().fg(p::text_primary()),
-            ),
+    let prefixes = crate::ui::tree::prefixes(rows);
+    let table_rows = rows.iter().zip(prefixes).map(|(row, prefix)| {
+        let totals = &row.totals;
+        let mut name = Line::raw(format!(
+            "{prefix}{} {}",
+            crate::ui::tree::icon(row, app.memory_tree.expanded.contains(&row.key)),
+            row.label
+        ));
+        if process_tree::system_only(&row.members) {
+            name.spans.push(Span::styled(
+                " [system]",
+                Style::default()
+                    .fg(p::text_muted())
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+        let mut cells = vec![
+            Cell::from(name),
+            Cell::from(if row.count == 1 {
+                String::new()
+            } else {
+                row.count.to_string()
+            }),
+            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
+            Cell::from(format!("{:.1}", mem_pct(totals.mem_rss, total_mem))),
         ];
         if show_footprint {
-            spans.push(Span::styled(
-                format!("{:>10} ", detail(proc_.mem_footprint)),
-                Style::default().fg(detail_fg(proc_.mem_footprint)),
-            ));
+            cells.push(detail(totals.mem_footprint));
         }
         if show_smaps {
-            for v in [
-                proc_.mem_pss,
-                proc_.mem_private,
-                proc_.mem_shared,
-                proc_.mem_swap,
-            ] {
-                spans.push(Span::styled(
-                    format!("{:>10} ", detail(v)),
-                    Style::default().fg(detail_fg(v)),
-                ));
-            }
+            cells.push(detail(totals.mem_pss));
+            cells.push(detail(totals.mem_private));
+            cells.push(leaf(row, |p| p.mem_shared));
+            cells.push(detail(totals.mem_swap));
         }
         if show_peak {
-            spans.push(Span::styled(
-                format!("{:>10} ", detail(proc_.mem_peak)),
-                Style::default().fg(detail_fg(proc_.mem_peak)),
-            ));
+            cells.push(leaf(row, |p| p.mem_peak));
         }
-        spans.push(Span::styled(
-            format!("{:>10} ", human_bytes(proc_.mem_rss)),
-            Style::default().fg(if show_footprint || show_smaps {
-                p::text_muted()
-            } else {
+        cells.push(
+            Cell::from(human_bytes(totals.mem_rss)).style(Style::default().fg(if show_virt {
                 p::brand()
-            }),
-        ));
-        if !show_footprint && !show_smaps {
-            spans.push(Span::styled(
-                format!("{:>10} ", human_bytes(proc_.mem_virt)),
-                Style::default().fg(p::text_muted()),
-            ));
+            } else {
+                p::text_muted()
+            })),
+        );
+        if show_virt {
+            cells.push(
+                Cell::from(
+                    row.process
+                        .map(|p| human_bytes(p.mem_virt))
+                        .unwrap_or_default(),
+                )
+                .style(Style::default().fg(p::text_muted())),
+            );
         }
-        spans.push(Span::styled(
-            proc_.name.clone(),
-            Style::default().fg(p::text_primary()),
-        ));
-        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
-            spans
-        } else {
-            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
-        };
-        lines.push(Line::from(spans));
-    }
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::bg())),
-        inner,
-    );
+        Row::new(cells)
+    });
+    let selected = app.memory_tree.selected_index(rows);
+    let table = Table::new(table_rows, widths)
+        .header(
+            Row::new(header).style(
+                Style::default()
+                    .fg(p::text_muted())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(block)
+        .column_spacing(1)
+        .row_highlight_style(Style::default().bg(p::selection_bg()).bold())
+        .style(Style::default().fg(p::text_primary()).bg(p::bg()));
+    let visible = inner.height.saturating_sub(1) as usize;
+    let offset = app.memory_scroll.follow(selected, rows.len(), visible);
+    let mut state = TableState::default()
+        .with_offset(offset)
+        .with_selected(Some(selected));
+    f.render_stateful_widget(table, area, &mut state);
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn proc(pid: u32, name: &str, cmd: &str, user: &str, rss: u64) -> ProcTick {
-        ProcTick {
-            pid,
-            name: name.into(),
-            cmd: cmd.into(),
-            user: user.into(),
-            mem_rss: rss,
-            ..Default::default()
-        }
-    }
-
-    fn fixture() -> Vec<ProcTick> {
-        vec![
-            proc(1, "kernel_task", "", "root", 900),
-            proc(
-                2,
-                "Chrome Helper",
-                "/Applications/Chrome --renderer",
-                "matt",
-                500,
-            ),
-            proc(3, "postgres", "postgres: writer", "postgres", 300),
-        ]
-    }
-
-    fn names(v: &[ProcTick]) -> Vec<&str> {
-        v.iter().map(|p| p.name.as_str()).collect()
-    }
-
-    // ── filter (issue #20) ──────────────────────────────────────────────
-
-    #[test]
-    fn no_filter_keeps_every_proc() {
-        assert_eq!(filtered_procs(&fixture(), None).len(), 3);
-    }
-
-    #[test]
-    fn filter_matches_name_cmd_or_user_case_insensitively() {
-        assert_eq!(
-            names(&filtered_procs(&fixture(), Some("CHROME"))),
-            ["Chrome Helper"]
-        );
-        assert_eq!(
-            names(&filtered_procs(&fixture(), Some("renderer"))),
-            ["Chrome Helper"]
-        );
-        assert_eq!(
-            names(&filtered_procs(&fixture(), Some("root"))),
-            ["kernel_task"]
-        );
-    }
-
-    /// The breakdown re-sorts by footprint/PSS/RSS afterwards, so the
-    /// filter must leave input order alone — imposing the Procs tab's
-    /// sort here would silently reorder the memory ranking.
-    #[test]
-    fn filter_preserves_input_order() {
-        let out = filtered_procs(&fixture(), Some("e"));
-        assert_eq!(names(&out), ["kernel_task", "Chrome Helper", "postgres"]);
-    }
-
-    #[test]
-    fn filter_with_no_matches_is_empty() {
-        assert!(filtered_procs(&fixture(), Some("zzz")).is_empty());
-    }
-}
+#[path = "memory_tests.rs"]
+mod tests;
