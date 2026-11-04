@@ -122,7 +122,12 @@ impl Collector {
     }
 
     pub fn sample(&mut self) -> Snapshot {
-        let now = Instant::now();
+        self.sample_at(Instant::now())
+    }
+
+    /// Sample as of `now`, which every refresh budget and rate interval in
+    /// this pass is measured from.
+    fn sample_at(&mut self, now: Instant) -> Snapshot {
         let dt_secs = self
             .last_tick
             .map(|t| (now - t).as_secs_f64().max(0.001))
@@ -900,13 +905,16 @@ mod tests {
     /// time since the last refresh.
     #[test]
     fn procs_cache_is_reused_within_the_refresh_window() {
+        // Explicit sample times: a loaded machine can spend seconds inside
+        // one real sample, which must not decide whether the next is stale.
+        let start = Instant::now();
         let mut c = Collector::new(1000);
-        let first = c.sample();
+        let first = c.sample_at(start);
         let refreshed_at = c.last_procs_refresh;
+        assert_eq!(refreshed_at, Some(start));
         let cached_len = c.cached_procs.len();
 
-        // Immediately again -- nowhere near the 3s PROCS_REFRESH window.
-        let second = c.sample();
+        let second = c.sample_at(start + std::time::Duration::from_millis(2999));
 
         assert_eq!(
             c.last_procs_refresh, refreshed_at,
@@ -924,6 +932,11 @@ mod tests {
         let second_pids: std::collections::BTreeSet<u32> =
             second.procs.iter().map(|p| p.pid).collect();
         assert_eq!(first_pids, second_pids);
+
+        // The budget is measured from the previous refresh, not the last tick.
+        let due = start + std::time::Duration::from_secs(3);
+        c.sample_at(due);
+        assert_eq!(c.last_procs_refresh, Some(due));
     }
 
     #[test]
