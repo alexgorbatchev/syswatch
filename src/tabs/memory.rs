@@ -229,7 +229,7 @@ fn draw_proc_breakdown(
         } else {
             "Process memory (by RSS)"
         },
-        app.user_config.cpu_group.label()
+        app.user_config.process_group.label()
     ));
     let inner = block.inner(area);
     f.render_widget(block, area);

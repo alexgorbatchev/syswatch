@@ -208,7 +208,7 @@ fn draw_evidence(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot, samples:
 fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[TreeRow<'_>], selected: usize) {
     let block = panel(format!(
         "Largest CPU consumers · {} · system last",
-        app.user_config.cpu_group.label()
+        app.user_config.process_group.label()
     ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -218,7 +218,7 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[TreeRow<'_>], selec
             .columns([
                 Column::cpu().sorted(true),
                 Column::memory(),
-                Column::recent(app, app.user_config.cpu_group),
+                Column::recent(app, app.user_config.process_group),
             ])
             .selection(selected, &app.cpu_scroll),
         inner,

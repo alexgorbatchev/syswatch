@@ -886,14 +886,14 @@ impl App {
         snap: &'s Snapshot,
     ) -> (Vec<TreeGroup<'s>>, Vec<TreeRow<'s>>) {
         let (mode, metric, filter) = match view {
-            TreeView::Cpu => (self.user_config.cpu_group, Metric::Cpu, None),
+            TreeView::Cpu => (self.user_config.process_group, Metric::Cpu, None),
             TreeView::Procs => (
-                self.user_config.cpu_group,
+                self.user_config.process_group,
                 self.proc_sort.metric(),
                 self.filter_active.as_deref(),
             ),
             TreeView::Memory => (
-                self.user_config.cpu_group,
+                self.user_config.process_group,
                 Metric::Memory,
                 self.filter_active.as_deref(),
             ),
@@ -909,7 +909,7 @@ impl App {
     /// Collapsed top-level groups for the read-only summary panels.
     pub(crate) fn summary_rows<'s>(&self, snap: &'s Snapshot, metric: Metric) -> Vec<TreeRow<'s>> {
         let forest = self.forest(snap);
-        let tree = Tree::new(snap, &forest, self.user_config.cpu_group, metric).exact();
+        let tree = Tree::new(snap, &forest, self.user_config.process_group, metric).exact();
         tree.rows(&tree.groups(None), &TreeState::default())
     }
 
@@ -1172,7 +1172,7 @@ impl App {
             (KeyCode::Tab, _) => self.active = next_tab(self.active),
             (KeyCode::BackTab, _) => self.active = prev_tab(self.active),
             (KeyCode::Char('b'), _) if self.active.shows_process_tree() => {
-                self.user_config.cpu_group = self.user_config.cpu_group.next();
+                self.user_config.process_group = self.user_config.process_group.next();
                 for tree in [
                     &mut self.cpu.tree,
                     &mut self.procs_tree,

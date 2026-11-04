@@ -114,7 +114,7 @@ fn draw_table(
 ) {
     let block = panel(format!(
         "PROCESSES · {} · system last",
-        app.user_config.cpu_group.label()
+        app.user_config.process_group.label()
     ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -131,7 +131,7 @@ fn draw_table(
         Column::new("USER", 10, |row, tone| Cell::Left(owners(row), tone.muted)).left(),
         Column::cpu().sorted(sort == ProcSort::Cpu),
         Column::memory().sorted(sort == ProcSort::Rss),
-        Column::recent(app, app.user_config.cpu_group),
+        Column::recent(app, app.user_config.process_group),
     ];
     // VIRT only when neither extra is shown. Virtual sizes overlap between
     // processes, so only process rows carry one.

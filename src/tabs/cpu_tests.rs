@@ -197,7 +197,7 @@ fn owning_tool_expands_helpers_with_pids_and_explains_ownership_in_both_modes() 
         helper.cpu_pct = 160.0;
         snap.procs.push(helper);
         app.snap = Some(snap);
-        app.user_config.cpu_group = mode;
+        app.user_config.process_group = mode;
         for _ in 0..5 {
             let snap = app.displayed_snap().unwrap();
             let keys: Vec<_> = app
@@ -245,7 +245,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         snap.procs[0].exe = Some("/bin/yazi".into());
         snap.procs[0].pid = 1161583;
         app.snap = Some(snap);
-        app.user_config.cpu_group = process_tree::GroupMode::Project;
+        app.user_config.process_group = process_tree::GroupMode::Project;
         let before = render(&app, width, 35);
         assert!(
             before.contains("Expand to inspect its processes."),
@@ -403,7 +403,7 @@ fn system_rows_are_marked_and_follow_users_even_when_they_use_more_cpu() {
         process_tree::GroupMode::Application,
         process_tree::GroupMode::Project,
     ] {
-        app.user_config.cpu_group = mode;
+        app.user_config.process_group = mode;
         let screen = render(&app, 140, 40);
         let lines: Vec<_> = screen.lines().collect();
         let system = lines
@@ -426,7 +426,7 @@ fn system_rows_are_marked_and_follow_users_even_when_they_use_more_cpu() {
             "{screen}"
         );
     }
-    app.user_config.cpu_group = process_tree::GroupMode::Application;
+    app.user_config.process_group = process_tree::GroupMode::Application;
     app.handle_key(KeyEvent::from(KeyCode::Down));
     app.handle_key(KeyEvent::from(KeyCode::Enter));
     let screen = render(&app, 140, 40);

@@ -250,7 +250,7 @@ fn draw_per_core(f: &mut Frame, area: Rect, snap: &Snapshot, style: GraphStyle) 
 fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let block = panel(format!(
         "Top consumers (by CPU · {})",
-        app.user_config.cpu_group.label()
+        app.user_config.process_group.label()
     ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -439,7 +439,7 @@ mod tests {
 
         let mut snap = snap;
         snap.procs[2].scope = crate::collect::ProcessScope::System;
-        app.user_config.cpu_group = crate::process_tree::GroupMode::Project;
+        app.user_config.process_group = crate::process_tree::GroupMode::Project;
         let rows = screen(80, 12, |f| draw_top_procs(f, f.area(), &app, &snap));
         assert!(rows[0].contains("Top consumers (by CPU · Project)"));
         assert!(

@@ -160,7 +160,7 @@ fn group_key_switches_every_tree_and_resets_their_state() {
     app.cpu.tree.selected = Some(RowKey::Process(20, None));
 
     key(&mut app, KeyCode::Char('b'));
-    assert_eq!(app.user_config.cpu_group, GroupMode::Project);
+    assert_eq!(app.user_config.process_group, GroupMode::Project);
     assert!(app.procs_tree.expanded.is_empty());
     assert_eq!(app.procs_tree.selected, None);
     assert_eq!(app.cpu.tree.selected, None);
@@ -170,12 +170,12 @@ fn group_key_switches_every_tree_and_resets_their_state() {
     // Tabs without a process tree leave the grouping alone.
     key(&mut app, KeyCode::Char('4'));
     key(&mut app, KeyCode::Char('b'));
-    assert_eq!(app.user_config.cpu_group, GroupMode::Project);
+    assert_eq!(app.user_config.process_group, GroupMode::Project);
     for tab in ['1', '2', '3', '8'] {
-        let before = app.user_config.cpu_group;
+        let before = app.user_config.process_group;
         key(&mut app, KeyCode::Char(tab));
         key(&mut app, KeyCode::Char('b'));
-        assert_eq!(app.user_config.cpu_group, before.next(), "tab {tab}");
+        assert_eq!(app.user_config.process_group, before.next(), "tab {tab}");
     }
 }
 

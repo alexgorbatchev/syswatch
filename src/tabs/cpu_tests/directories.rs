@@ -23,7 +23,7 @@ fn known_directory_expands_into_apps_and_pids_with_totals_and_details() {
     snap.procs.push(second_node);
     app.history.push(&snap);
     app.snap = Some(snap);
-    app.user_config.cpu_group = process_tree::GroupMode::Project;
+    app.user_config.process_group = process_tree::GroupMode::Project;
     let before = render(&app, 140, 40);
     assert!(before.contains("~/syswatch-directory-fixture"), "{before}");
     assert!(before.contains("No Git project discovered"), "{before}");

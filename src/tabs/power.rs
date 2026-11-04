@@ -56,7 +56,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
 fn draw_energy(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let block = panel(format!(
         "Top energy consumers (~ measured CPU power × CPU share · {})",
-        app.user_config.cpu_group.label()
+        app.user_config.process_group.label()
     ));
     let inner = block.inner(area);
     f.render_widget(block, area);

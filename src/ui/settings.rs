@@ -31,7 +31,7 @@ pub mod cursor {
     pub const GRAPH_FADE: usize = 2;
     pub const DEFAULT_TAB: usize = 3;
     pub const TICK_MS: usize = 4;
-    pub const CPU_GROUP: usize = 5;
+    pub const PROCESS_GROUP: usize = 5;
 }
 
 pub const ROWS: usize = 6;
@@ -44,7 +44,7 @@ fn is_enum_row(idx: usize) -> bool {
             | cursor::GRAPH_STYLE
             | cursor::GRAPH_FADE
             | cursor::DEFAULT_TAB
-            | cursor::CPU_GROUP
+            | cursor::PROCESS_GROUP
     )
 }
 
@@ -76,8 +76,8 @@ fn build_rows(cfg: &SyswatchConfig) -> Vec<Row> {
             value: cfg.tick_ms.to_string(),
         },
         Row {
-            label: "CPU grouping",
-            value: cfg.cpu_group.label().into(),
+            label: "Process grouping",
+            value: cfg.process_group.label().into(),
         },
     ]
 }
@@ -205,7 +205,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 /// Cycle to the next value for an enum row. No-op for non-enum rows.
 pub fn cycle_next(cfg: &mut SyswatchConfig, cursor: usize) {
     match cursor {
-        c if c == cursor::CPU_GROUP => cfg.cpu_group = cfg.cpu_group.next(),
+        c if c == cursor::PROCESS_GROUP => cfg.process_group = cfg.process_group.next(),
         c if c == cursor::THEME => {
             let i = theme::THEME_NAMES
                 .iter()
@@ -236,7 +236,7 @@ pub fn cycle_next(cfg: &mut SyswatchConfig, cursor: usize) {
 
 pub fn cycle_prev(cfg: &mut SyswatchConfig, cursor: usize) {
     match cursor {
-        c if c == cursor::CPU_GROUP => cycle_next(cfg, cursor),
+        c if c == cursor::PROCESS_GROUP => cycle_next(cfg, cursor),
         c if c == cursor::THEME => {
             let i = theme::THEME_NAMES
                 .iter()
