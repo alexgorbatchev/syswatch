@@ -49,7 +49,7 @@ pub(super) fn append<'a>(
     children.sort_by(|a, b| {
         system_only(&a.members)
             .cmp(&system_only(&b.members))
-            .then_with(|| usage_order(build.metric, &a.totals, &a.label, &b.totals, &b.label))
+            .then_with(|| usage_order(build.order, &a.totals, &a.label, &b.totals, &b.label))
             .then_with(|| a.process.map(|p| p.pid).cmp(&b.process.map(|p| p.pid)))
     });
     for row in children {

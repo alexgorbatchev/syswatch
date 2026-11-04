@@ -76,25 +76,49 @@ const MIB: f64 = 1024.0 * 1024.0;
 const GIB: f64 = 1024.0 * MIB;
 
 impl Metric {
-    fn band(self, totals: &Totals) -> f64 {
-        let percent = |pct: Option<f32>| f64::from((pct.unwrap_or(0.0).max(0.0) / 5.0).floor());
+    /// The measured value and the width of one band, in the same unit.
+    fn measure(self, totals: &Totals) -> (f64, f64) {
+        let positive = |value: Option<f32>| f64::from(value.unwrap_or(0.0).max(0.0));
         match self {
-            Self::Cpu => percent(totals.cpu_pct),
-            Self::Gpu => percent(totals.gpu_pct),
-            Self::Power => f64::from(totals.power_w.unwrap_or(0.0).max(0.0).floor()),
-            Self::Rss => (totals.mem_rss as f64 / GIB).floor(),
-            Self::Memory => (totals.mem_attributed as f64 / GIB).floor(),
-            Self::Io => ((totals.io_read_rate + totals.io_write_rate).max(0.0) / MIB).floor(),
-            Self::Net => {
-                let rate = totals.net_rx_rate.unwrap_or(0.0) + totals.net_tx_rate.unwrap_or(0.0);
-                (rate.max(0.0) / (128.0 * 1024.0)).floor()
-            }
+            Self::Cpu => (positive(totals.cpu_pct), 5.0),
+            Self::Gpu => (positive(totals.gpu_pct), 5.0),
+            Self::Power => (positive(totals.power_w), 1.0),
+            Self::Rss => (totals.mem_rss as f64, GIB),
+            Self::Memory => (totals.mem_attributed as f64, GIB),
+            Self::Io => ((totals.io_read_rate + totals.io_write_rate).max(0.0), MIB),
+            Self::Net => (
+                (totals.net_rx_rate.unwrap_or(0.0) + totals.net_tx_rate.unwrap_or(0.0)).max(0.0),
+                128.0 * 1024.0,
+            ),
             // Unknown start times sort after every known one.
-            Self::Start => totals
-                .newest_start
-                .and_then(|start| start.duration_since(UNIX_EPOCH).ok())
-                .map_or(-1.0, |since| since.as_secs() as f64),
-            Self::Name => 0.0,
+            Self::Start => (
+                totals
+                    .newest_start
+                    .and_then(|start| start.duration_since(UNIX_EPOCH).ok())
+                    .map_or(-1.0, |since| since.as_secs() as f64),
+                1.0,
+            ),
+            Self::Name => (0.0, 1.0),
+        }
+    }
+}
+
+/// A metric and how finely rows rank by it.
+#[derive(Debug, Clone, Copy)]
+struct Order {
+    metric: Metric,
+    /// Navigable lists rank by band so rows hold still while values move;
+    /// summaries, which cannot be navigated, rank by exact value.
+    exact: bool,
+}
+
+impl Order {
+    fn key(self, totals: &Totals) -> f64 {
+        let (value, band) = self.metric.measure(totals);
+        if self.exact {
+            value
+        } else {
+            (value / band).floor()
         }
     }
 }
@@ -418,10 +442,10 @@ fn partition<'s, M>(
         .collect()
 }
 
-/// Total and order partitioned groups by `metric`.
+/// Total and order partitioned groups.
 fn rank<'s>(
     snap: &Snapshot,
-    metric: Metric,
+    order: Order,
     parts: impl IntoIterator<Item = Part<&'s ProcTick>>,
 ) -> Vec<TreeGroup<'s>> {
     let mut groups: Vec<_> = parts
@@ -430,7 +454,7 @@ fn rank<'s>(
             let mut members: Vec<_> = part
                 .members
                 .into_iter()
-                .map(|p| (metric.band(&Totals::of(snap, [p])), p))
+                .map(|p| (order.key(&Totals::of(snap, [p])), p))
                 .collect();
             members.sort_by(|(a_band, a), (b_band, b)| {
                 (a.scope == ProcessScope::System)
@@ -452,7 +476,7 @@ fn rank<'s>(
     groups.sort_by(|a, b| {
         system_only(&a.members)
             .cmp(&system_only(&b.members))
-            .then_with(|| metric.band(&b.totals).total_cmp(&metric.band(&a.totals)))
+            .then_with(|| order.key(&b.totals).total_cmp(&order.key(&a.totals)))
             .then_with(|| {
                 matches!(b.key, GroupKey::Project { .. })
                     .cmp(&matches!(a.key, GroupKey::Project { .. }))
@@ -464,15 +488,15 @@ fn rank<'s>(
 }
 
 fn usage_order(
-    metric: Metric,
+    order: Order,
     a: &Totals,
     a_name: &str,
     b: &Totals,
     b_name: &str,
 ) -> std::cmp::Ordering {
-    metric
-        .band(b)
-        .total_cmp(&metric.band(a))
+    order
+        .key(b)
+        .total_cmp(&order.key(a))
         .then_with(|| name_order(a_name, b_name))
 }
 
@@ -643,7 +667,7 @@ pub struct Tree<'s, 'f> {
     snap: &'s Snapshot,
     forest: &'f Forest,
     mode: GroupMode,
-    metric: Metric,
+    order: Order,
 }
 
 impl<'s, 'f> Tree<'s, 'f> {
@@ -652,8 +676,18 @@ impl<'s, 'f> Tree<'s, 'f> {
             snap,
             forest,
             mode,
-            metric,
+            order: Order {
+                metric,
+                exact: false,
+            },
         }
+    }
+
+    /// Rank by exact value rather than by band, for summaries that cannot be
+    /// navigated: their first row is always the largest.
+    pub fn exact(mut self) -> Self {
+        self.order.exact = true;
+        self
     }
 
     /// Top-level groups. A filter keeps whole groups that contain a matching
@@ -680,13 +714,13 @@ impl<'s, 'f> Tree<'s, 'f> {
                 icon: group.icon,
                 members: group.members.iter().map(|&i| &procs[i]).collect(),
             });
-        rank(self.snap, self.metric, parts)
+        rank(self.snap, self.order, parts)
     }
 
     pub fn rows(&self, groups: &[TreeGroup<'s>], state: &TreeState) -> Vec<TreeRow<'s>> {
         let build = Build {
             snap: self.snap,
-            metric: self.metric,
+            order: self.order,
             ownership: self
                 .forest
                 .partition(self.snap, self.mode)
@@ -743,7 +777,7 @@ impl<'s, 'f> Tree<'s, 'f> {
 /// Inputs shared while expanding one tree's rows.
 struct Build<'s, 'b> {
     snap: &'s Snapshot,
-    metric: Metric,
+    order: Order,
     ownership: Ownership<'s, 'b>,
     state: &'b TreeState,
 }
@@ -766,7 +800,7 @@ impl<'s> Build<'s, '_> {
         checkouts.sort_by(|a, b| {
             system_only(&a.1)
                 .cmp(&system_only(&b.1))
-                .then_with(|| usage_order(self.metric, &a.2, &a.3, &b.2, &b.3))
+                .then_with(|| usage_order(self.order, &a.2, &a.3, &b.2, &b.3))
         });
         for (path, procs, totals, label) in checkouts {
             let key = RowKey::Directory(group.key.clone(), path.into());
@@ -803,7 +837,7 @@ impl<'s> Build<'s, '_> {
             procs.iter().map(|&p| (p, p)),
             &self.ownership,
         );
-        for app in rank(self.snap, self.metric, parts) {
+        for app in rank(self.snap, self.order, parts) {
             let key = RowKey::Application(Box::new(context.clone()), app.key.clone());
             let row = TreeRow {
                 key: key.clone(),

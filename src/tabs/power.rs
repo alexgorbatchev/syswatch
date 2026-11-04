@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn energy_ranks_groups_in_watt_bands_and_hides_idle_ones() {
+    fn energy_ranks_groups_by_exact_draw_and_hides_idle_ones() {
         let proc = |pid, name: &str, power| crate::collect::ProcTick {
             pid,
             name: name.into(),
@@ -661,6 +661,7 @@ mod tests {
                 proc(20, "alpha", 0.9),
                 proc(10, "browser", 0.6),
                 proc(11, "browser", 0.6),
+                proc(40, "zulu", 0.95),
                 proc(30, "idle", 0.001),
             ],
             ..Default::default()
@@ -680,8 +681,10 @@ mod tests {
             .collect();
         let browser = rows.iter().position(|l| l.contains("browser")).unwrap();
         let alpha = rows.iter().position(|l| l.contains("alpha")).unwrap();
-        // 1.2 W lands in a higher band than 0.9 W despite sorting by name.
-        assert!(browser < alpha, "{rows:#?}");
+        // Summaries rank by exact draw: 1.2 W, then 0.95 W ahead of 0.9 W
+        // although "alpha" sorts first by name.
+        let zulu = rows.iter().position(|l| l.contains("zulu")).unwrap();
+        assert!(browser < zulu && zulu < alpha, "{rows:#?}");
         assert!(rows[browser].contains(" 2 ") && rows[browser].contains("~1.20 W"));
         assert!(rows[alpha].contains(" 20 "), "{}", rows[alpha]);
         assert!(rows[1].contains("POWER") && rows[1].contains("SHARE"));

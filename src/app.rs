@@ -909,7 +909,7 @@ impl App {
     /// Collapsed top-level groups for the read-only summary panels.
     pub(crate) fn summary_rows<'s>(&self, snap: &'s Snapshot, metric: Metric) -> Vec<TreeRow<'s>> {
         let forest = self.forest(snap);
-        let tree = Tree::new(snap, &forest, self.user_config.cpu_group, metric);
+        let tree = Tree::new(snap, &forest, self.user_config.cpu_group, metric).exact();
         tree.rows(&tree.groups(None), &TreeState::default())
     }
 

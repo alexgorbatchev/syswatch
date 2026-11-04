@@ -398,6 +398,8 @@ mod tests {
                 proc(11, "browser", 80.0, 0.6),
                 proc(20, "postgres", 8.0, 0.9),
                 proc(30, "idle", 0.0, 0.001),
+                proc(40, "alpha", 56.0, 0.0),
+                proc(50, "zeta", 72.0, 0.0),
             ],
             ..Default::default()
         }
@@ -427,6 +429,10 @@ mod tests {
             browser.contains(" 2 ") && browser.contains("40%"),
             "{browser}"
         );
+        // 9% and 7% share a 5% band; the summary still puts the larger first.
+        let zeta = rows.iter().position(|l| l.contains("zeta")).unwrap();
+        let alpha = rows.iter().position(|l| l.contains("alpha")).unwrap();
+        assert!(zeta < alpha, "{rows:#?}");
         let postgres = rows.iter().position(|l| l.contains("postgres")).unwrap();
         assert!(rows[postgres].contains(" 20 "), "{}", rows[postgres]);
         assert!(!rows.iter().any(|l| l.contains(" 10 ")), "{rows:#?}");

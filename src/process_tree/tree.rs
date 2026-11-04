@@ -120,7 +120,7 @@ fn entries<'a>(
     entries.sort_by(|(a, _), (b, _)| {
         system_only(&b.members)
             .cmp(&system_only(&a.members))
-            .then_with(|| usage_order(build.metric, &b.totals, &b.label, &a.totals, &a.label))
+            .then_with(|| usage_order(build.order, &b.totals, &b.label, &a.totals, &a.label))
             .then_with(|| b.process.map(|p| p.pid).cmp(&a.process.map(|p| p.pid)))
     });
     entries

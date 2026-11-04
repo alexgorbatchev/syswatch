@@ -167,23 +167,24 @@ any of those tabs or the CPU tab switches all of them between application and
 project grouping and resets their selection and expansion; open Settings with
 `,` and press `S` to persist it. Dense always groups by project.
 
-Each view ranks rows by its own measure in descending bands, then by the CPU
-tab's name order with repositories first in each band:
+Each navigable view ranks rows by its own measure in descending bands, then by
+the CPU tab's name order with repositories first in each band:
 
 | View | Measure | Band |
 |---|---|---|
-| CPU, Overview, Procs `cpu` | Whole-machine CPU | 5% |
+| CPU, Procs `cpu` | Whole-machine CPU | 5% |
 | Procs `mem` | Resident memory (RSS) | 1 GiB |
 | Memory | Footprint, else PSS, else RSS, per process | 1 GiB |
 | Procs `io` | Disk read + write | 1 MiB/s |
 | Procs `gpu` | GPU utilisation | 5% |
 | Procs `net` | Network receive + transmit | 128 KiB/s |
-| Power | Estimated power | 1 W |
 | Procs `start` | Newest member start time, newest first | 1 second |
 | Procs `name` | Name only | — |
 
 Rows within a band stay alphabetical as usage changes, so the first row is not
-necessarily the largest. Group totals sum their members. Optional measures such
+necessarily the largest. Overview (whole-machine CPU) and Power (estimated
+power) cannot be navigated, so they rank by exact value instead: their first
+row is always the largest. Group totals sum their members. Optional measures such
 as PSS, swap, network rates, GPU and power sum the members that report them and
 show `—` when none do. Shared memory, peak memory, virtual size and process
 state are not additive and appear only on process rows.
