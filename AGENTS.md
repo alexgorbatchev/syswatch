@@ -29,7 +29,8 @@ target: understand which projects and tools consume resources, including helpers
   project/folder hierarchy merely because it contains one PID.
 - Group each PID by its own working directory. Within Git, group directories by
   checkout/worktree root beneath the repository; outside Git, use the known
-  working directory. A helper in another project belongs to its own project.
+  working directory. The filesystem root is not a location: processes there
+  group by application. A helper in another project belongs to its own project.
 - Combine local repositories without a network origin by repository directory
   name, preserving each checkout path as a separate child row. Keep remote
   repositories identified by host and repository.

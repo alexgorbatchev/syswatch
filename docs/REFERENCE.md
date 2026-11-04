@@ -100,6 +100,8 @@ Repositories without a network origin combine by repository directory name,
 with separate checkout rows for each path. Network and local identities remain
 separate. A known
 working directory without a discovered repository gets its own directory row.
+The filesystem root is not one: service managers start daemons and apps there,
+so those processes group by application, like ones whose directory is unknown.
 Projects and directories combine OS users; details list their owners.
 
 Expand a checkout or directory to see applications with combined CPU, memory and

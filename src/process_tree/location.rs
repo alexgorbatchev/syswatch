@@ -20,10 +20,13 @@ pub(super) fn of(process: &ProcTick) -> Option<Location<'_>> {
             path: &project.checkout,
         })
     } else {
+        // Service managers start daemons and apps at the filesystem root, so
+        // it says nothing about what a process works on: those processes group
+        // by application, like ones whose directory is unknown.
         process
             .cwd
             .as_deref()
-            .filter(|path| !path.is_empty())
+            .filter(|path| std::path::Path::new(path).parent().is_some())
             .map(Location::Directory)
     }
 }

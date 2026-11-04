@@ -67,16 +67,18 @@ fn directory_groups_combine_different_applications_and_owners() {
 }
 
 #[test]
-fn empty_and_missing_directories_fall_back_to_applications() {
+fn empty_missing_and_root_directories_fall_back_to_applications() {
     let snap = snapshot(vec![
         in_directory(1, "/bin/node", None, 8.0),
         in_directory(2, "/bin/node", Some(""), 8.0),
         in_directory(3, "/bin/node", Some("/work/known"), 8.0),
+        in_directory(4, "/bin/node", Some("/"), 8.0),
     ]);
     let grouped = groups(&snap, GroupMode::Project);
     assert_eq!(grouped.len(), 2);
     let unknown = grouped.iter().find(|g| g.label == "node").unwrap();
-    assert_eq!(unknown.members.len(), 2);
+    assert_eq!(unknown.members.len(), 3);
+    assert!(!grouped.iter().any(|g| g.label == "/"));
     let known = grouped.iter().find(|g| g.label == "/work/known").unwrap();
     assert_eq!(known.members[0].pid, 3);
 }
