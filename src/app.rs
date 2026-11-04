@@ -2261,6 +2261,7 @@ mod tests {
     /// it yellow above 10% of the machine rather than 10% of one core.
     #[test]
     fn lite_rows_show_whole_machine_cpu() {
+        let _theme = crate::ui::theme::exclusive_theme();
         use crate::config::SyswatchConfig;
 
         let mut app = App::new(TabId::Overview, SyswatchConfig::default());

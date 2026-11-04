@@ -680,6 +680,7 @@ mod tests {
 
     #[test]
     fn selection_marks_and_scrolls_while_summaries_start_at_the_top() {
+        let _theme = theme::exclusive_theme();
         let procs: Vec<_> = (0..6)
             .map(|pid| ProcTick {
                 pid,
@@ -706,6 +707,7 @@ mod tests {
 
     #[test]
     fn names_tone_by_cpu_and_quieten_annotations() {
+        let _theme = theme::exclusive_theme();
         let system = ProcTick {
             pid: 1,
             name: "sshd".into(),
@@ -740,6 +742,7 @@ mod tests {
 
     #[test]
     fn readouts_use_dense_tones_and_the_sorted_header_is_accented() {
+        let _theme = theme::exclusive_theme();
         let p = ProcTick {
             pid: 9,
             name: "big".into(),

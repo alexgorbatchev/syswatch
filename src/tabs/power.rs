@@ -694,6 +694,7 @@ mod tests {
 
     #[test]
     fn energy_warns_on_heavy_draw_and_explains_an_empty_window() {
+        let _theme = crate::ui::theme::exclusive_theme();
         let app = App::new(
             crate::app::TabId::Power,
             crate::config::SyswatchConfig::default(),

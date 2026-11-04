@@ -680,6 +680,7 @@ fn recent_column_uses_more_history_on_wide_terminals() {
 
 #[test]
 fn deleted_executable_is_muted_and_explained_even_when_selected() {
+    let _theme = crate::ui::theme::exclusive_theme();
     let mut app = app();
     let mut snap = app.snap.take().unwrap();
     snap.procs[0].exe = Some("/opt/worker (deleted)".into());
