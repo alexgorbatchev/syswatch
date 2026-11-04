@@ -70,9 +70,10 @@ target: understand which projects and tools consume resources, including helpers
   before editing. Ground implementation and completion claims in tool evidence.
 - Reuse `src/process_tree.rs` and `src/process_tree/` for grouping, ranking,
   ownership, and stable row identities in every process view. Build a view's
-  rows through `App::tree_rows` so drawing and key handling agree. Keep Dense
-  rendering in `src/ui/dense/`; avoid a separate grouping implementation that
-  drifts between views.
+  rows through `App::tree_rows` so drawing and key handling agree. Draw every
+  process list with `TreeTable` in `src/ui/tree.rs`, styled after Dense; views
+  supply only columns. Keep Dense's panels and other boxes in `src/ui/dense/`.
+  Avoid separate grouping or list rendering that drifts between views.
 - Keep grouping snapshot-based so replay and timeline scrubbing agree with live
   views. Persist new attribution metadata in recordings, and version incompatible
   postcard schema changes explicitly.

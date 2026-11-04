@@ -2,15 +2,17 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Table, TableState},
+    widgets::Paragraph,
     Frame,
 };
 
 use crate::app::{App, Snapshot, TreeView};
+use crate::collect::ProcTick;
 use crate::process_tree::{self, TreeGroup, TreeRow};
 use crate::ui::{
     graph::GraphStyle,
     palette as p,
+    tree::{Cell, Column, TreeTable},
     widgets::{block_bar_styled, human_bytes, mem_pct, panel},
 };
 
@@ -230,136 +232,57 @@ fn draw_proc_breakdown(
         app.user_config.cpu_group.label()
     ));
     let inner = block.inner(area);
-    if rows.is_empty() {
-        f.render_widget(
-            Paragraph::new("No matching processes.")
-                .block(block)
-                .style(Style::default().fg(p::text_muted()).bg(p::bg())),
-            area,
-        );
-        return;
-    }
+    f.render_widget(block, area);
 
-    let pid_width = rows
-        .iter()
-        .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
-        .max()
-        .unwrap_or(0)
-        .max(3) as u16;
-    let mut header = vec!["Application / project", "Procs", "PID", "%MEM"];
-    let mut widths = vec![
-        Constraint::Min(16),
-        Constraint::Length(5),
-        Constraint::Length(pid_width),
-        Constraint::Length(5),
-    ];
+    // Non-additive measures: blank for groups rather than a misleading sum.
+    let leaf = |header, value: fn(&ProcTick) -> Option<u64>| {
+        Column::new(header, 10, move |row, tone| {
+            row.process.map_or(Cell::Blank, |p| tone.bytes(value(p)))
+        })
+    };
+    let mut columns = vec![Column::new("%MEM", 5, move |row, tone| {
+        Cell::Text(
+            format!("{:.1}", mem_pct(row.totals.mem_rss, total_mem)),
+            tone.muted,
+        )
+    })];
     if show_footprint {
-        header.push("FOOTPRNT");
+        columns.push(
+            Column::new("FOOTPRNT", 10, |row, tone| {
+                tone.bytes(row.totals.mem_footprint)
+            })
+            .sorted(true),
+        );
     }
     if show_smaps {
-        header.extend(["PSS", "PRIVATE", "SHARED", "SWAP"]);
+        columns.extend([
+            Column::new("PSS", 10, |row, tone| tone.bytes(row.totals.mem_pss))
+                .sorted(!show_footprint),
+            Column::new("PRIVATE", 10, |row, tone| {
+                tone.bytes(row.totals.mem_private)
+            }),
+            leaf("SHARED", |p| p.mem_shared),
+            Column::new("SWAP", 10, |row, tone| tone.bytes(row.totals.mem_swap)),
+        ]);
     }
     if show_peak {
-        header.push("PEAK");
+        columns.push(leaf("PEAK", |p| p.mem_peak));
     }
-    header.push("RSS");
+    columns.push(
+        Column::new("RSS", 10, |row, tone| tone.bytes(Some(row.totals.mem_rss))).sorted(show_virt),
+    );
     if show_virt {
-        header.push("VIRT");
+        columns.push(leaf("VIRT", |p| Some(p.mem_virt)));
     }
-    widths.resize(header.len(), Constraint::Length(10));
-
-    // None → "—": the proc exists but detail wasn't readable (other
-    // user without sudo) or it ranked below the sampler's top-N cap.
-    let detail = |v: Option<u64>| {
-        Cell::from(v.map(human_bytes).unwrap_or_else(|| "—".into())).style(Style::default().fg(
-            if v.is_some() {
-                p::brand()
-            } else {
-                p::text_muted()
-            },
-        ))
-    };
-    // Non-additive measures: blank for groups rather than a misleading sum.
-    let leaf = |row: &TreeRow<'_>, v: fn(&crate::collect::ProcTick) -> Option<u64>| {
-        row.process.map_or_else(|| Cell::from(""), |p| detail(v(p)))
-    };
-
-    let prefixes = crate::ui::tree::prefixes(rows);
-    let table_rows = rows.iter().zip(prefixes).map(|(row, prefix)| {
-        let totals = &row.totals;
-        let mut name = Line::raw(format!(
-            "{prefix}{} {}",
-            crate::ui::tree::icon(row, app.memory_tree.expanded.contains(&row.key)),
-            row.label
-        ));
-        if process_tree::system_only(&row.members) {
-            name.spans.push(Span::styled(
-                " [system]",
-                Style::default()
-                    .fg(p::text_muted())
-                    .add_modifier(Modifier::DIM),
-            ));
-        }
-        let mut cells = vec![
-            Cell::from(name),
-            Cell::from(if row.count == 1 {
-                String::new()
-            } else {
-                row.count.to_string()
-            }),
-            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
-            Cell::from(format!("{:.1}", mem_pct(totals.mem_rss, total_mem))),
-        ];
-        if show_footprint {
-            cells.push(detail(totals.mem_footprint));
-        }
-        if show_smaps {
-            cells.push(detail(totals.mem_pss));
-            cells.push(detail(totals.mem_private));
-            cells.push(leaf(row, |p| p.mem_shared));
-            cells.push(detail(totals.mem_swap));
-        }
-        if show_peak {
-            cells.push(leaf(row, |p| p.mem_peak));
-        }
-        cells.push(
-            Cell::from(human_bytes(totals.mem_rss)).style(Style::default().fg(if show_virt {
-                p::brand()
-            } else {
-                p::text_muted()
-            })),
-        );
-        if show_virt {
-            cells.push(
-                Cell::from(
-                    row.process
-                        .map(|p| human_bytes(p.mem_virt))
-                        .unwrap_or_default(),
-                )
-                .style(Style::default().fg(p::text_muted())),
-            );
-        }
-        Row::new(cells)
-    });
     let selected = app.memory_tree.selected_index(rows);
-    let table = Table::new(table_rows, widths)
-        .header(
-            Row::new(header).style(
-                Style::default()
-                    .fg(p::text_muted())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .block(block)
-        .column_spacing(1)
-        .row_highlight_style(Style::default().bg(p::selection_bg()).bold())
-        .style(Style::default().fg(p::text_primary()).bg(p::bg()));
-    let visible = inner.height.saturating_sub(1) as usize;
-    let offset = app.memory_scroll.follow(selected, rows.len(), visible);
-    let mut state = TableState::default()
-        .with_offset(offset)
-        .with_selected(Some(selected));
-    f.render_stateful_widget(table, area, &mut state);
+    f.render_widget(
+        TreeTable::new(rows, "APPLICATION / PROJECT")
+            .expanded(&app.memory_tree.expanded)
+            .columns(columns)
+            .selection(selected, &app.memory_scroll)
+            .empty("No matching processes."),
+        inner,
+    );
 }
 
 #[cfg(test)]

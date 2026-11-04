@@ -1,16 +1,17 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
 use crate::app::{App, Snapshot, TreeView};
 use crate::process_tree::{self, GroupKey, TreeGroup, TreeRow, TreeState};
+use crate::ui::tree::{Column, TreeTable};
 use crate::ui::{
     palette as p,
-    widgets::{human_bytes, panel, sparkline_string},
+    widgets::{panel, sparkline_string},
 };
 
 #[cfg(test)]
@@ -210,111 +211,18 @@ fn draw_groups(f: &mut Frame, area: Rect, app: &App, rows: &[TreeRow<'_>], selec
         app.user_config.cpu_group.label()
     ));
     let inner = block.inner(area);
-    if rows.is_empty() {
-        f.render_widget(
-            Paragraph::new("No process samples available.").block(block),
-            area,
-        );
-        return;
-    }
-    let pid_width = rows
-        .iter()
-        .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
-        .max()
-        .unwrap_or(0)
-        .max(3);
-    // Give trends a quarter of the row, reserving space for names, fixed
-    // columns and five separators so long PIDs remain visible.
-    let reserved_width = 12 + 5 + pid_width + 5 + 10 + 5;
-    let trend_width = (inner.width as usize / 4)
-        .clamp(8, 48)
-        .min((inner.width as usize).saturating_sub(reserved_width));
-    let prefixes = crate::ui::tree::prefixes(rows);
-    let table_rows = rows.iter().zip(prefixes).map(|(row, prefix)| {
-        let name = format!(
-            "{}{} {}",
-            prefix,
-            crate::ui::tree::icon(row, app.cpu.tree.expanded.contains(&row.key)),
-            row.label
-        );
-        let mut name = muted_deleted(name);
-        if process_tree::system_only(&row.members) {
-            name.spans.push(Span::styled(
-                " [system]",
-                Style::default()
-                    .fg(p::text_muted())
-                    .add_modifier(Modifier::DIM),
-            ));
-        }
-        let trend = if row.depth == 0 && row.totals.cpu_pct.is_some() {
-            let mut values: Vec<_> = (app.scrub_offset..app.scrub_offset + trend_width)
-                .map_while(|offset| app.history.cpu_groups.nth_back(offset))
-                .map(|point| point.get(app.user_config.cpu_group, &row.group) / 100.0)
-                .collect();
-            values.reverse();
-            sparkline_string(&values, app.graph_style)
-        } else {
-            String::new()
-        };
-        Row::new(vec![
-            Cell::from(name),
-            Cell::from(if row.count == 1 {
-                String::new()
-            } else {
-                row.count.to_string()
-            }),
-            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()),
-            Cell::from(
-                row.totals
-                    .cpu_pct
-                    .map(|pct| format!("{pct:.0}%"))
-                    .unwrap_or_else(|| "n/a".into()),
-            )
-            .style(
-                Style::default().fg(row
-                    .totals
-                    .cpu_pct
-                    .map(|pct| super::overview::kpi_color(pct, 30.0, 70.0))
-                    .unwrap_or_else(p::text_muted)),
-            ),
-            Cell::from(human_bytes(row.totals.mem_rss)),
-            Cell::from(trend),
-        ])
-    });
-    let table = Table::new(
-        table_rows,
-        [
-            Constraint::Min(12),
-            Constraint::Length(5),
-            Constraint::Length(pid_width as u16),
-            Constraint::Length(5),
-            Constraint::Length(10),
-            Constraint::Length(trend_width as u16),
-        ],
-    )
-    .header(
-        Row::new([
-            "Application / project",
-            "Procs",
-            "PID",
-            "CPU",
-            "Memory",
-            "Recent",
-        ])
-        .style(Style::default().fg(p::text_muted())),
-    )
-    .block(block)
-    .column_spacing(1)
-    .row_highlight_style(Style::default().bg(p::selection_bg()).bold())
-    .style(Style::default().fg(p::text_primary()).bg(p::bg()));
-    // Rows are one line each, below the one-line header. Given a window that
-    // already shows the selection, the table draws it unmoved.
-    let visible = inner.height.saturating_sub(1) as usize;
-    let offset = app.cpu_scroll.follow(selected, rows.len(), visible);
-    let mut state = TableState::default()
-        .with_offset(offset)
-        .with_selected(Some(selected));
-    f.render_stateful_widget(table, area, &mut state);
+    f.render_widget(block, area);
+    f.render_widget(
+        TreeTable::new(rows, "APPLICATION / PROJECT")
+            .expanded(&app.cpu.tree.expanded)
+            .columns([
+                Column::cpu().sorted(true),
+                Column::memory(),
+                Column::recent(app, app.user_config.cpu_group),
+            ])
+            .selection(selected, &app.cpu_scroll),
+        inner,
+    );
 }
 
 fn muted_deleted(text: String) -> Line<'static> {

@@ -2,7 +2,7 @@ use super::*;
 use crate::app::TabId;
 use crate::collect::{CpuTick, MemTick, ProcTick};
 use crate::config::SyswatchConfig;
-use crate::process_tree::{GroupKey, GroupMode, RowKey};
+use crate::process_tree::{GroupMode, RowKey};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{backend::TestBackend, Terminal};
 
@@ -183,7 +183,7 @@ fn group_key_switches_every_tree_and_resets_their_state() {
 fn optional_columns_follow_available_data() {
     let mut app = app();
     let screen = render(&app, 160, 30);
-    assert!(screen[row_of(&screen, "Application / project")].contains("VIRT"));
+    assert!(screen[row_of(&screen, "APPLICATION / PROJECT")].contains("VIRT"));
 
     let snap = app.snap.as_mut().unwrap();
     snap.net_rates_estimated = true;
@@ -192,9 +192,9 @@ fn optional_columns_follow_available_data() {
     snap.procs[1].gpu_mem_bytes = Some(GIB);
     snap.procs[2].state = 'Z';
     let screen = render(&app, 200, 30);
-    let header = &screen[row_of(&screen, "Application / project")];
+    let header = &screen[row_of(&screen, "APPLICATION / PROJECT")];
     assert!(
-        header.contains("~NET ↓/s") && header.contains("%GPU"),
+        header.contains("~NET ↓/s") && header.contains(" GPU "),
         "{header}"
     );
     assert!(!header.contains("VIRT"), "{header}");
@@ -205,42 +205,6 @@ fn optional_columns_follow_available_data() {
     );
     assert!(browser.contains("1.0 GB"), "{browser}");
     assert!(screen[row_of(&screen, "postgres")].contains(" Z "));
-}
-
-#[test]
-fn cpu_history_charts_groups_and_processes_only() {
-    let mut app = app();
-    let snap = app.snap.clone().unwrap();
-    for _ in 0..3 {
-        app.history.push(&snap);
-    }
-    let group = GroupKey::Application {
-        identity: "name:browser".into(),
-    };
-    app.procs_tree.expanded.insert(RowKey::Group(group));
-    let (_, rows) = app.tree_rows(TreeView::Procs, &snap);
-    assert!(!cpu_history(&app, &rows[0]).trim().is_empty());
-    assert!(!cpu_history(&app, &rows[1]).trim().is_empty());
-    assert_eq!(cpu_history(&app, &rows[1]).chars().count(), CPU_SPARK_W);
-}
-
-#[test]
-fn spark_cell_is_header_width_for_any_history_depth() {
-    let style = crate::ui::graph::GraphStyle::Bars;
-    for n in [
-        0,
-        1,
-        CPU_SPARK_W,
-        CPU_SPARK_W + 1,
-        crate::app::PROC_CPU_SPARK_LEN,
-    ] {
-        let samples = vec![0.5; n];
-        assert_eq!(
-            spark_cell(&samples, style).chars().count(),
-            CPU_SPARK_W,
-            "{n} samples"
-        );
-    }
 }
 
 #[test]
@@ -280,7 +244,7 @@ fn rows_mark_system_groups_shared_owners_states_and_measured_rates() {
         snap.procs[2].scope = crate::collect::ProcessScope::System;
     }
     let screen = render(&app, 200, 30);
-    let header = &screen[row_of(&screen, "Application / project")];
+    let header = &screen[row_of(&screen, "APPLICATION / PROJECT")];
     assert!(
         header.contains("NET ↓/s") && !header.contains("~NET"),
         "{header}"
@@ -302,26 +266,4 @@ fn rows_mark_system_groups_shared_owners_states_and_measured_rates() {
     app.filter_buf = "bro".into();
     let screen = render(&app, 200, 30);
     assert!(screen[0].contains("bro"), "{}", screen[0]);
-}
-
-#[test]
-fn checkout_rows_have_no_history_of_their_own() {
-    let mut app = app();
-    app.user_config.cpu_group = GroupMode::Project;
-    for p in &mut app.snap.as_mut().unwrap().procs {
-        p.cwd = Some("/work/site".into());
-        p.project = Some(crate::collect::ProjectIdentity {
-            host: "github.com".into(),
-            repo: "acme/site".into(),
-            checkout: "/work/site".into(),
-        });
-    }
-    let snap = app.snap.clone().unwrap();
-    app.history.push(&snap);
-    key(&mut app, KeyCode::Enter);
-    let (_, rows) = app.tree_rows(TreeView::Procs, &snap);
-    assert_eq!(rows[1].depth, 1);
-    assert!(rows[1].process.is_none());
-    assert_eq!(cpu_history(&app, &rows[1]), "");
-    assert!(!cpu_history(&app, &rows[0]).trim().is_empty());
 }

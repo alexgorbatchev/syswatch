@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Table, TableState},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -10,6 +10,7 @@ use crate::app::{App, ProcSort, Snapshot, TreeView};
 use crate::process_tree::{self, TreeRow};
 use crate::ui::{
     palette as p,
+    tree::{Cell, Column, TreeTable},
     widgets::{human_bytes, human_rate, mem_pct, panel},
 };
 
@@ -116,15 +117,7 @@ fn draw_table(
         app.user_config.cpu_group.label()
     ));
     let inner = block.inner(area);
-    if rows.is_empty() {
-        f.render_widget(
-            Paragraph::new("No matching processes.")
-                .block(block)
-                .style(Style::default().fg(p::text_muted()).bg(p::bg())),
-            area,
-        );
-        return;
-    }
+    f.render_widget(block, area);
 
     // Show NET / GPU columns only when at least one proc has data —
     // saves columns on platforms where the source isn't available.
@@ -133,163 +126,90 @@ fn draw_table(
         .procs
         .iter()
         .any(|p| p.gpu_pct.is_some() || p.gpu_mem_bytes.is_some());
-    // VIRT only when neither extras are shown — keeps the row from
-    // sprawling past 120 cols when both NET and GPU are populated.
-    let show_virt = !show_net && !show_gpu;
-    let total_mem = snap.mem.total_bytes.max(1);
-    let pid_width = rows
-        .iter()
-        .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
-        .max()
-        .unwrap_or(0)
-        .max(3) as u16;
-
-    let mut header = vec!["Application / project", "Procs", "PID", "User", "CPU"];
-    let mut widths = vec![
-        Constraint::Min(16),
-        Constraint::Length(5),
-        Constraint::Length(pid_width),
-        Constraint::Length(10),
-        Constraint::Length(4),
-        Constraint::Length(CPU_SPARK_W as u16),
-        Constraint::Length(5),
+    let sort = app.proc_sort;
+    let mut columns = vec![
+        Column::new("USER", 10, |row, tone| Cell::Left(owners(row), tone.muted)).left(),
+        Column::cpu().sorted(sort == ProcSort::Cpu),
+        Column::memory().sorted(sort == ProcSort::Rss),
+        Column::recent(app, app.user_config.cpu_group),
     ];
-    header.extend(["CPU hist", "%MEM"]);
-    if show_virt {
-        header.push("VIRT");
-        widths.push(Constraint::Length(9));
+    // VIRT only when neither extra is shown. Virtual sizes overlap between
+    // processes, so only process rows carry one.
+    if !show_net && !show_gpu {
+        columns.push(Column::new("VIRT", 9, |row, tone| {
+            row.process
+                .map_or(Cell::Blank, |p| tone.bytes(Some(p.mem_virt)))
+        }));
     }
-    header.extend(["State", "R/s", "W/s"]);
-    widths.extend([
-        Constraint::Length(5),
-        Constraint::Length(10),
-        Constraint::Length(10),
+    columns.push(Column::new("STATE", 5, |row, tone| {
+        row.process.map_or(Cell::Blank, |p| {
+            Cell::Text(
+                p.state.to_string(),
+                match p.state {
+                    'R' => tone.theme.status_good,
+                    'Z' => tone.theme.status_error,
+                    _ => tone.muted,
+                },
+            )
+        })
+    }));
+    let io = sort == ProcSort::Io;
+    columns.extend([
+        Column::new("R/s", 10, |row, tone| {
+            tone.rate(row.totals.io_read_rate, tone.ramps.primary.mid())
+        })
+        .sorted(io),
+        Column::new("W/s", 10, |row, tone| {
+            tone.rate(row.totals.io_write_rate, tone.ramps.secondary.mid())
+        })
+        .sorted(io),
     ]);
     if show_net {
         // `~` marks the connection-count estimate; measured rates
         // (nettop on macOS) render unmarked.
-        header.extend(if snap.net_rates_estimated {
-            ["~NET ↓/s", "~NET ↑/s"]
+        let (rx, tx) = if snap.net_rates_estimated {
+            ("~NET ↓/s", "~NET ↑/s")
         } else {
-            ["NET ↓/s", "NET ↑/s"]
-        });
-        widths.extend([Constraint::Length(10), Constraint::Length(10)]);
+            ("NET ↓/s", "NET ↑/s")
+        };
+        let net = sort == ProcSort::Net;
+        columns.extend([
+            Column::new(rx, 10, |row, tone| {
+                tone.rate(
+                    row.totals.net_rx_rate.unwrap_or(0.0),
+                    tone.ramps.primary.mid(),
+                )
+            })
+            .sorted(net),
+            Column::new(tx, 10, |row, tone| {
+                tone.rate(
+                    row.totals.net_tx_rate.unwrap_or(0.0),
+                    tone.ramps.secondary.mid(),
+                )
+            })
+            .sorted(net),
+        ]);
     }
     if show_gpu {
-        header.extend(["%GPU", "GPU MEM"]);
-        widths.extend([Constraint::Length(5), Constraint::Length(9)]);
-    }
-
-    let prefixes = crate::ui::tree::prefixes(rows);
-    let table_rows = rows.iter().zip(prefixes).map(|(row, prefix)| {
-        let totals = &row.totals;
-        let process = row.process;
-        let rate = |value: f64, active| {
-            Cell::from(human_rate(value)).style(Style::default().fg(if value > 0.0 {
-                active
-            } else {
-                p::text_muted()
-            }))
-        };
-        let mut name = Line::raw(format!(
-            "{prefix}{} {}",
-            crate::ui::tree::icon(row, app.procs_tree.expanded.contains(&row.key)),
-            row.label
-        ));
-        if process_tree::system_only(&row.members) {
-            name.spans.push(Span::styled(
-                " [system]",
-                Style::default()
-                    .fg(p::text_muted())
-                    .add_modifier(Modifier::DIM),
-            ));
-        }
-        let mut cells = vec![
-            Cell::from(name),
-            Cell::from(if row.count == 1 {
-                String::new()
-            } else {
-                row.count.to_string()
+        columns.extend([
+            Column::new("GPU", 5, |row, tone| match row.totals.gpu_pct {
+                Some(pct) => Cell::Text(format!("{pct:.0}%"), tone.usage(pct)),
+                None => Cell::Text("—".into(), tone.muted),
+            })
+            .sorted(sort == ProcSort::Gpu),
+            Column::new("GPU MEM", 9, |row, tone| {
+                tone.bytes(row.totals.gpu_mem_bytes)
             }),
-            Cell::from(process.map(|p| p.pid.to_string()).unwrap_or_default()),
-            Cell::from(owners(row)).style(Style::default().fg(p::text_muted())),
-            cpu_cell(totals.cpu_pct),
-            Cell::from(cpu_history(app, row)).style(Style::default().fg(p::brand())),
-            Cell::from(format!("{:.1}", mem_pct(totals.mem_rss, total_mem))),
-        ];
-        if show_virt {
-            // Virtual sizes overlap between processes; only leaves show one.
-            cells.push(
-                Cell::from(process.map(|p| human_bytes(p.mem_virt)).unwrap_or_default())
-                    .style(Style::default().fg(p::text_muted())),
-            );
-        }
-        cells.push(match process {
-            Some(p_) => Cell::from(p_.state.to_string()).style(
-                Style::default()
-                    .fg(state_color(p_.state))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            None => Cell::from(""),
-        });
-        cells.push(rate(totals.io_read_rate, p::brand()));
-        cells.push(rate(totals.io_write_rate, p::brand()));
-        if show_net {
-            cells.push(rate(totals.net_rx_rate.unwrap_or(0.0), p::status_good()));
-            cells.push(rate(totals.net_tx_rate.unwrap_or(0.0), p::tx_rate()));
-        }
-        if show_gpu {
-            let pct = totals.gpu_pct.unwrap_or(0.0);
-            cells.push(Cell::from(format!("{pct:.0}%")).style(Style::default().fg(
-                if pct >= 30.0 {
-                    p::status_warn()
-                } else if pct > 0.0 {
-                    p::brand()
-                } else {
-                    p::text_muted()
-                },
-            )));
-            cells.push(
-                Cell::from(match totals.gpu_mem_bytes {
-                    Some(b) if b > 0 => human_bytes(b),
-                    _ => "—".into(),
-                })
-                .style(Style::default().fg(if totals.gpu_mem_bytes.is_some() {
-                    p::brand()
-                } else {
-                    p::text_muted()
-                })),
-            );
-        }
-        Row::new(cells)
-    });
-
-    let table = Table::new(table_rows, widths)
-        .header(Row::new(header).style(header_style()))
-        .block(block)
-        .column_spacing(1)
-        .row_highlight_style(Style::default().bg(p::selection_bg()).bold())
-        .style(Style::default().fg(p::text_primary()).bg(p::bg()));
-    // Rows are one line each, below the one-line header.
-    let visible = inner.height.saturating_sub(1) as usize;
-    let offset = app.proc_scroll.follow(selected, rows.len(), visible);
-    let mut state = TableState::default()
-        .with_offset(offset)
-        .with_selected(Some(selected));
-    f.render_stateful_widget(table, area, &mut state);
-}
-
-/// Whole-machine CPU without decimals, coloured like the CPU tab.
-fn cpu_cell(pct: Option<f32>) -> Cell<'static> {
-    Cell::from(
-        pct.map(|pct| format!("{pct:.0}%"))
-            .unwrap_or_else(|| "n/a".into()),
-    )
-    .style(
-        Style::default().fg(pct
-            .map(|pct| super::overview::kpi_color(pct, 30.0, 70.0))
-            .unwrap_or_else(p::text_muted)),
-    )
+        ]);
+    }
+    f.render_widget(
+        TreeTable::new(rows, "APPLICATION / PROJECT")
+            .expanded(&app.procs_tree.expanded)
+            .columns(columns)
+            .selection(selected, &app.proc_scroll)
+            .empty("No matching processes."),
+        inner,
+    );
 }
 
 /// The single owner of a row's processes, or how many owners share it.
@@ -299,38 +219,6 @@ fn owners(row: &TreeRow<'_>) -> String {
         1 => owners.into_iter().next().cloned().unwrap_or_default(),
         n => format!("{n} users"),
     }
-}
-
-fn state_color(state: char) -> ratatui::style::Color {
-    match state {
-        'R' => p::status_good(),
-        'S' | 'I' => p::text_primary(),
-        'Z' => p::status_error(),
-        _ => p::text_muted(),
-    }
-}
-
-/// Top-level groups chart their recorded share of the machine; process rows
-/// chart their own samples. Intermediate rows have no recorded history.
-fn cpu_history(app: &App, row: &TreeRow<'_>) -> String {
-    if let Some(process) = row.process {
-        let samples = app
-            .history
-            .proc_cpu_history
-            .get(&process.pid)
-            .map(|r| r.to_vec())
-            .unwrap_or_default();
-        return spark_cell(&samples, app.graph_style);
-    }
-    if row.depth > 0 {
-        return String::new();
-    }
-    let mut samples: Vec<_> = (app.scrub_offset..app.scrub_offset + CPU_SPARK_W)
-        .map_while(|offset| app.history.cpu_groups.nth_back(offset))
-        .map(|point| point.get(app.user_config.cpu_group, &row.group) / 100.0)
-        .collect();
-    samples.reverse();
-    spark_cell(&samples, app.graph_style)
 }
 
 fn draw_drill_in(f: &mut Frame, area: Rect, snap: &Snapshot, row: Option<&TreeRow<'_>>) {
@@ -472,25 +360,6 @@ fn kv(k: &str, v: String, val_color: ratatui::style::Color) -> Line<'static> {
         Span::styled(format!("{:<11} ", k), Style::default().fg(p::text_muted())),
         Span::styled(v, Style::default().fg(val_color)),
     ])
-}
-
-/// Width of the `CPU hist` column.
-const CPU_SPARK_W: usize = 8;
-
-/// Render the `CPU hist` cell: exactly `CPU_SPARK_W` chars, newest sample
-/// last, left-padded while history is still filling. History is kept
-/// `PROC_CPU_SPARK_LEN` deep for the Dense view, so only the most recent
-/// samples fit here.
-fn spark_cell(samples: &[f32], style: crate::ui::graph::GraphStyle) -> String {
-    let tail = &samples[samples.len().saturating_sub(CPU_SPARK_W)..];
-    let glyphs = crate::ui::widgets::sparkline_string(tail, style);
-    format!("{}{}", " ".repeat(CPU_SPARK_W - tail.len()), glyphs)
-}
-
-fn header_style() -> Style {
-    Style::default()
-        .fg(p::text_muted())
-        .add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

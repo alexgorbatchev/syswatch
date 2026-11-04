@@ -186,16 +186,25 @@ as PSS, swap, network rates, GPU and power sum the members that report them and
 show `—` when none do. Shared memory, peak memory, virtual size and process
 state are not additive and appear only on process rows.
 
-The Procs tab shows whole-machine CPU without decimals, like the CPU tab. Its
-CPU history charts a top-level group's share of the machine, or a process row's
-own per-process samples; intermediate rows have none. The drill-in pane
-describes the selected group or process. The Memory tab gains `↑`/`↓` and
-`Enter` for the tree. In both tabs, the shared filter keeps every top-level
-group containing a process whose name, command or user matches, with all of its
-members and their full totals; the status line reports kept groups and matching
-processes. Overview and Power show collapsed top-level groups only; Power
-omits groups drawing 0.005 W or less. Graph fade applies to the Overview and
-Power summaries but not to the navigable tree tables.
+Every process list, including Dense's, is drawn by one shared component in
+Dense's style: a `▶` marker and highlight on the selected row, first-column
+labels toned by whole-machine CPU (gray below 10%, normal from 10%, red from
+30%), dim `(deleted)`, container IDs and `[system]` badges, right-aligned
+readouts, CPU coloured at 30% and 70%, memory below 1 GiB in gray, and braille
+CPU history for top-level groups only. The column ranked by is accented in the
+header. On narrow terminals readouts are dropped from the right before the name
+column shrinks below 18 columns; the history column needs at least six.
+
+The Procs tab shows the owner (or the number of owners), CPU, resident memory,
+history, process state, disk and, where available, network and GPU readouts.
+Virtual size and state appear only on process rows. The drill-in pane describes
+the selected group or process. The Memory tab gains `↑`/`↓` and `Enter` for
+the tree. In both tabs, the shared filter keeps every top-level group containing
+a process whose name, command or user matches, with all of its members and their
+full totals; the status line reports kept groups and matching processes.
+Overview and Power show collapsed top-level groups only; Power omits groups
+drawing 0.005 W or less and shows each group's draw as a meter scaled to the
+largest. Graph fade does not apply to process lists.
 
 Ownership and grouping are derived once per displayed process table and shared
 by every view and key handler; they are recomputed when a process's identity,

@@ -132,9 +132,9 @@ fn rss_only_samples_show_virtual_size_on_process_rows() {
     }
     let screen = render(&app, 140, 30);
     row_of(&screen, "Process memory (by RSS)");
-    let header = &screen[row_of(&screen, "Application / project")];
+    let header = &screen[row_of(&screen, "APPLICATION / PROJECT")];
     assert!(
-        header.contains("VIRT") && !header.contains("PSS"),
+        header.contains("VIRT") && header.contains("RSS") && !header.contains("PSS"),
         "{header}"
     );
     assert!(screen[row_of(&screen, "postgres")].contains("3.0 GB"));
@@ -151,7 +151,7 @@ fn footprint_samples_lead_the_breakdown_and_mark_system_groups() {
     app.snap.as_mut().unwrap().procs[2].scope = crate::collect::ProcessScope::System;
     let screen = render(&app, 140, 30);
     row_of(&screen, "footprint = real pressure");
-    assert!(screen[row_of(&screen, "Application / project")].contains("FOOTPRNT"));
+    assert!(screen[row_of(&screen, "APPLICATION / PROJECT")].contains("FOOTPRNT"));
     let browser = &screen[row_of(&screen, "browser")];
     assert!(browser.contains("750.0 MB"), "summed footprint: {browser}");
     assert!(screen[row_of(&screen, "postgres")].contains("[system]"));

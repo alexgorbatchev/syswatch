@@ -2,72 +2,18 @@
 
 use std::collections::BTreeSet;
 
-use super::{
-    paint, short_cmd, truncate, App, Buffer, Color, Layout, Modifier, Ramps, Rect, Series,
-    Snapshot, Style, Theme,
-};
+use super::{paint, short_cmd, truncate, App, Buffer, Layout, Rect, Snapshot, Style, Theme};
 use crate::app::TreeView;
 use crate::process_tree::{self, GroupMode, TreeRow};
+use crate::ui::tree::{Column, TreeTable};
 use crate::ui::widgets::human_bytes;
-use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 
-struct Columns {
-    name: u16,
-    name_width: u16,
-    procs: u16,
-    pid: u16,
-    pid_width: u16,
-    cpu: u16,
-    mem: u16,
-    spark: u16,
-    spark_width: u16,
-}
-
-impl Columns {
-    fn new(inner: Rect, rows: &[TreeRow<'_>]) -> Self {
-        let pid_width = rows
-            .iter()
-            .filter_map(|row| row.process.map(|proc| proc.pid.to_string().len()))
-            .max()
-            .unwrap_or(3)
-            .max(3) as u16;
-        let width = inner.width.saturating_sub(4);
-        let fixed = 5 + pid_width + 5 + 10 + 5;
-        let spark_width = (width / 4).min(28).min(width.saturating_sub(fixed + 18));
-        let name = inner.x + 3;
-        let name_width = width.saturating_sub(fixed + spark_width);
-        let procs = name + name_width + 1;
-        let pid = procs + 6;
-        let cpu = pid + pid_width + 1;
-        let mem = cpu + 6;
-        let spark = mem + 11;
-        Self {
-            name,
-            name_width,
-            procs,
-            pid,
-            pid_width,
-            cpu,
-            mem,
-            spark,
-            spark_width,
-        }
-    }
-}
-
-pub(super) fn draw(
-    buf: &mut Buffer,
-    layout: &Layout,
-    theme: &Theme,
-    ramps: &Ramps,
-    app: &App,
-    snap: &Snapshot,
-) {
+pub(super) fn draw(buf: &mut Buffer, layout: &Layout, theme: &Theme, app: &App, snap: &Snapshot) {
     if layout.procs.width == 0 || layout.procs.height == 0 {
         return;
     }
     let (groups, rows) = app.tree_rows(TreeView::Dense, snap);
-    let prefixes = crate::ui::tree::prefixes(&rows);
     let selected = app.dense.tree.selected_index(&rows);
     let visible = layout.visible_procs().max(1);
     let first = app.dense.scroll.follow(selected, rows.len(), visible);
@@ -121,7 +67,6 @@ pub(super) fn draw(
     if inner.height < 2 || inner.width < 40 {
         return;
     }
-    let cols = Columns::new(inner, &rows);
     let mut y = inner.y;
     if inner.height >= 4 {
         if let Some(row) = rows.get(selected) {
@@ -129,154 +74,22 @@ pub(super) fn draw(
         }
         y += 2;
     }
-    let header = Style::default().fg(theme.border);
-    paint::put(
-        buf,
-        cols.name,
-        y,
-        &truncate("APPLICATION / PROJECT", cols.name_width as usize),
-        header,
-    );
-    paint::put_right(buf, cols.procs + 4, y, "PROCS", header);
-    paint::put_right(buf, cols.pid + cols.pid_width - 1, y, "PID", header);
-    paint::put_right(
-        buf,
-        cols.cpu + 4,
-        y,
-        "CPU",
-        Style::default()
-            .fg(theme.brand)
-            .add_modifier(Modifier::BOLD),
-    );
-    paint::put_right(buf, cols.mem + 9, y, "MEM", header);
-    if cols.spark_width >= 6 {
-        paint::put(buf, cols.spark, y, "RECENT", header);
-    }
-    y += 1;
-    for (index, row) in rows.iter().enumerate().take(last).skip(first) {
-        if y >= inner.bottom() {
-            break;
-        }
-        let is_selected = index == selected;
-        let muted = if is_selected {
-            theme.text_secondary
-        } else {
-            theme.text_muted
-        };
-        if is_selected {
-            for x in inner.x..inner.right() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_bg(theme.selection_bg);
-                }
-            }
-            paint::put(buf, inner.x + 1, y, "▶", Style::default().fg(theme.brand));
-        }
-        let mut name = Line::from(Span::raw(format!(
-            "{}{} ",
-            prefixes[index],
-            crate::ui::tree::icon(row, app.dense.tree.expanded.contains(&row.key))
-        )))
-        .style(Style::default().fg(label_color(row.totals.cpu_pct, theme, muted)));
-        if let (process_tree::RowKey::Container(_), Some((label, id))) =
-            (&row.key, row.label.split_once(' '))
-        {
-            name.spans.push(Span::raw(format!("{label} ")));
-            name.spans
-                .push(Span::styled(id, Style::default().fg(muted)));
-        } else {
-            name.spans.push(Span::raw(&row.label));
-        }
-        if process_tree::system_only(&row.members) {
-            name.spans.push(Span::styled(
-                " [system]",
-                Style::default().fg(muted).add_modifier(Modifier::DIM),
-            ));
-        }
-        buf.set_line(cols.name, y, &name, cols.name_width);
-        if row.count > 1 {
-            paint::put_right(
-                buf,
-                cols.procs + 4,
+    TreeTable::new(&rows, "APPLICATION / PROJECT")
+        .expanded(&app.dense.tree.expanded)
+        .columns([
+            Column::cpu().sorted(true),
+            Column::memory(),
+            Column::recent(app, GroupMode::Project),
+        ])
+        .selection(selected, &app.dense.scroll)
+        .render(
+            Rect {
                 y,
-                &row.count.to_string(),
-                Style::default().fg(muted),
-            );
-        }
-        if let Some(proc) = row.process {
-            paint::put_right(
-                buf,
-                cols.pid + cols.pid_width - 1,
-                y,
-                &proc.pid.to_string(),
-                Style::default().fg(muted),
-            );
-        }
-        let cpu = row
-            .totals
-            .cpu_pct
-            .map(|pct| format!("{pct:.0}%"))
-            .unwrap_or_else(|| "n/a".into());
-        paint::put_right(
+                height: inner.bottom().saturating_sub(y),
+                ..inner
+            },
             buf,
-            cols.cpu + 4,
-            y,
-            &cpu,
-            Style::default().fg(cpu_color(row.totals.cpu_pct, theme, muted)),
         );
-        paint::put_right(
-            buf,
-            cols.mem + 9,
-            y,
-            &human_bytes(row.totals.mem_rss),
-            Style::default().fg(if row.totals.mem_rss < 1024 * 1024 * 1024 {
-                muted
-            } else {
-                ramps.secondary.mid()
-            }),
-        );
-        if cols.spark_width >= 6 && row.depth == 0 && row.totals.cpu_pct.is_some() {
-            let mut values: Vec<u64> = (app.scrub_offset
-                ..app.scrub_offset + cols.spark_width as usize)
-                .map_while(|offset| app.history.cpu_groups.nth_back(offset))
-                .map(|point| {
-                    paint::perceptual(point.get(GroupMode::Project, &row.group) / 100.0, 64)
-                })
-                .collect();
-            values.reverse();
-            if values.len() > 1 {
-                let series = Series::fixed(values, cols.spark_width, 64);
-                paint::spark(
-                    buf,
-                    cols.spark,
-                    y,
-                    cols.spark_width,
-                    &series.plot(),
-                    series.max,
-                    &ramps.primary,
-                );
-            } else {
-                paint::put(buf, cols.spark, y, "·", Style::default().fg(muted));
-            }
-        }
-        y += 1;
-    }
-}
-
-fn label_color(pct: Option<f32>, theme: &Theme, muted: Color) -> Color {
-    match pct {
-        Some(pct) if pct >= 30.0 => theme.status_error,
-        Some(pct) if pct >= 10.0 => theme.text_primary,
-        _ => muted,
-    }
-}
-
-fn cpu_color(pct: Option<f32>, theme: &Theme, muted: Color) -> Color {
-    match pct {
-        Some(pct) if pct >= 70.0 => theme.status_error,
-        Some(pct) if pct >= 30.0 => theme.status_warn,
-        Some(_) => theme.status_good,
-        None => muted,
-    }
 }
 
 fn details(buf: &mut Buffer, inner: Rect, y: u16, theme: &Theme, row: &TreeRow<'_>) {

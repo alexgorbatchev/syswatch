@@ -9,6 +9,7 @@ use ratatui::{
 use crate::app::{App, Snapshot};
 use crate::collect::{BatteryTick, PowerSource, PowerTick};
 use crate::process_tree::Metric;
+use crate::ui::tree::{Cell, Column, TreeTable};
 use crate::ui::{
     graph::GraphStyle,
     palette as p,
@@ -60,68 +61,37 @@ fn draw_energy(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let ranked: Vec<_> = app
+    let rows: Vec<_> = app
         .summary_rows(snap, Metric::Power)
         .into_iter()
         .filter(|row| row.totals.power_w.is_some_and(|w| w > 0.005))
         .collect();
-
-    if ranked.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "No measurable per-process draw this window.",
-                Style::default().fg(p::text_muted()),
-            )]))
-            .style(Style::default().bg(p::bg())),
-            inner,
-        );
-        return;
-    }
-
-    let take = inner.height as usize;
     // Rows within a 1 W band sort by name, so the first row need not be
     // the largest.
-    let max_w = ranked
+    let max_w = rows
         .iter()
         .filter_map(|row| row.totals.power_w)
         .fold(0.001, f32::max);
-    let rendered_rows = ranked.len().min(take);
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, row) in ranked.iter().take(take).enumerate() {
-        let w = row.totals.power_w.unwrap_or(0.0);
-        let row_alpha = if app.user_config.graph_fade {
-            crate::ui::graph::row_fade_alpha(i, rendered_rows)
-        } else {
-            1.0
-        };
-        let color = if w >= 10.0 {
-            p::status_warn()
-        } else {
-            p::brand()
-        };
-        let bar = block_bar_styled((w / max_w).clamp(0.0, 1.0), 24, color, app.graph_style);
-        let mut spans = vec![Span::styled(
-            format!("{:>8} W  ", format!("~{:.2}", w)),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )];
-        spans.extend(bar.spans);
-        let detail = match row.process {
-            Some(process) => format!("pid {}", process.pid),
-            None => format!("{} procs", row.count),
-        };
-        spans.push(Span::styled(
-            format!("  {} {} ({detail})", row.icon, row.label),
-            Style::default().fg(p::text_primary()),
-        ));
-        let spans = if (row_alpha - 1.0).abs() < f32::EPSILON {
-            spans
-        } else {
-            crate::ui::graph::fade_spans_fg(spans, p::bg(), row_alpha)
-        };
-        lines.push(Line::from(spans));
-    }
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::bg())),
+        TreeTable::new(&rows, "APPLICATION / PROJECT")
+            .columns([
+                Column::new("POWER", 9, |row, tone| {
+                    let w = row.totals.power_w.unwrap_or(0.0);
+                    Cell::Text(
+                        format!("~{w:.2} W"),
+                        if w >= 10.0 {
+                            tone.theme.status_warn
+                        } else {
+                            tone.theme.text_primary
+                        },
+                    )
+                })
+                .sorted(true),
+                Column::share("SHARE", 4, 24, move |row, _| {
+                    Cell::Meter(row.totals.power_w.unwrap_or(0.0) / max_w)
+                }),
+            ])
+            .empty("No measurable per-process draw this window."),
         inner,
     );
 }
@@ -708,21 +678,23 @@ mod tests {
         let rows: Vec<String> = (0..8)
             .map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect())
             .collect();
-        let browser = rows.iter().position(|l| l.contains("browser (2 procs)"));
-        let alpha = rows.iter().position(|l| l.contains("alpha (pid 20)"));
+        let browser = rows.iter().position(|l| l.contains("browser")).unwrap();
+        let alpha = rows.iter().position(|l| l.contains("alpha")).unwrap();
         // 1.2 W lands in a higher band than 0.9 W despite sorting by name.
-        assert!(browser.unwrap() < alpha.unwrap(), "{rows:#?}");
-        assert!(rows[browser.unwrap()].contains("~1.20 W"));
+        assert!(browser < alpha, "{rows:#?}");
+        assert!(rows[browser].contains(" 2 ") && rows[browser].contains("~1.20 W"));
+        assert!(rows[alpha].contains(" 20 "), "{}", rows[alpha]);
+        assert!(rows[1].contains("POWER") && rows[1].contains("SHARE"));
+        assert!(rows[browser].contains('■'), "{}", rows[browser]);
         assert!(!rows.iter().any(|l| l.contains("idle")), "{rows:#?}");
     }
 
     #[test]
     fn energy_warns_on_heavy_draw_and_explains_an_empty_window() {
-        let mut app = App::new(
+        let app = App::new(
             crate::app::TabId::Power,
             crate::config::SyswatchConfig::default(),
         );
-        app.user_config.graph_fade = true;
         let heavy = crate::collect::ProcTick {
             pid: 7,
             name: "render".into(),
@@ -743,8 +715,8 @@ mod tests {
         });
         let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("~24.00 W"), "{text}");
-        let row = (0..100).find(|&x| buffer[(x, 1)].symbol() == "~").unwrap();
-        assert_eq!(buffer[(row, 1)].fg, p::status_warn());
+        let x = (0..100).find(|&x| buffer[(x, 2)].symbol() == "~").unwrap();
+        assert_eq!(buffer[(x, 2)].fg, p::status_warn());
 
         let empty = render(&Snapshot::default());
         let text: String = empty.content().iter().map(|c| c.symbol()).collect();

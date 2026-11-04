@@ -102,17 +102,16 @@ fn expanded_processes_have_a_separate_pid_column() {
         let lines: Vec<_> = screen.lines().collect();
         let header = lines
             .iter()
-            .find(|l| l.contains("Procs") && l.contains("CPU"))
+            .find(|l| l.contains("PROCS") && l.contains("CPU"))
             .unwrap();
         let pid_column = header[..header.find("PID").expect("separate PID header")]
             .chars()
             .count();
-        let count_column = header[..header.find("Procs").unwrap()].chars().count();
-        let cpu_column = header[..header.find("CPU").unwrap()].chars().count();
+        let count_column = header[..header.find("PROCS").unwrap()].chars().count();
         assert!(count_column < pid_column, "{header}");
         let group = lines
             .iter()
-            .skip_while(|l| !l.contains("Procs") || !l.contains("CPU"))
+            .skip_while(|l| !l.contains("PROCS") || !l.contains("CPU"))
             .find(|l| l.contains('%'))
             .unwrap();
         let leaf = lines
@@ -122,17 +121,21 @@ fn expanded_processes_have_a_separate_pid_column() {
             })
             .unwrap_or_else(|| panic!("{screen}"));
         assert!(!leaf.contains("PID"), "{leaf}");
+        // Readouts are right-aligned: the PID field runs from the end of
+        // the PROCS header to the end of the PID header.
+        let pid_end = pid_column + "PID".len();
+        let pid_start = count_column + "PROCS".len();
         let pid: String = leaf
             .chars()
-            .skip(pid_column)
-            .take(cpu_column - pid_column)
+            .skip(pid_start)
+            .take(pid_end - pid_start)
             .collect();
         assert_eq!(pid.trim(), expected_pid, "{leaf}");
         assert!(
             group
                 .chars()
-                .skip(pid_column)
-                .take(cpu_column - pid_column)
+                .skip(pid_start)
+                .take(pid_end - pid_start)
                 .all(|c| c == ' '),
             "{group}"
         );
@@ -152,9 +155,9 @@ fn procs_column_hides_single_process_counts_but_keeps_group_counts() {
         let screen = render(&app, width, 35);
         let header = screen
             .lines()
-            .find(|l| l.contains("Procs") && l.contains("CPU"))
+            .find(|l| l.contains("PROCS") && l.contains("CPU"))
             .unwrap();
-        let start = header[..header.find("Procs").unwrap()].chars().count();
+        let start = header[..header.find("PROCS").unwrap()].chars().count();
         let end = header[..header.find("PID").unwrap()].chars().count();
         assert!(start < end, "{header}");
         let counts: Vec<_> = screen
@@ -271,12 +274,14 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         let expanded = render(&app, width, 35);
         let header = expanded
             .lines()
-            .find(|l| l.contains("Procs") && l.contains("CPU"))
+            .find(|l| l.contains("PROCS") && l.contains("CPU"))
             .unwrap();
-        let pid_start = header[..header.find("PID").unwrap()].chars().count();
-        let count_start = header[..header.find("Procs").unwrap()].chars().count();
-        let cpu_start = header[..header.find("CPU").unwrap()].chars().count();
-        assert!(count_start < pid_start, "{header}");
+        let pid_header = header[..header.find("PID").unwrap()].chars().count();
+        let count_start = header[..header.find("PROCS").unwrap()].chars().count();
+        assert!(count_start < pid_header, "{header}");
+        // Readouts are right-aligned: the PID field ends with its header.
+        let pid_start = count_start + "PROCS".len();
+        let pid_end = pid_header + "PID".len();
         let table: Vec<_> = expanded
             .lines()
             .skip_while(|l| *l != header)
@@ -291,7 +296,7 @@ fn singleton_project_expands_through_checkout_to_its_pid_and_details() {
         assert_eq!(
             row.chars()
                 .skip(pid_start)
-                .take(cpu_start - pid_start)
+                .take(pid_end - pid_start)
                 .collect::<String>()
                 .trim(),
             "1161583"
@@ -665,7 +670,10 @@ fn recent_column_uses_more_history_on_wide_terminals() {
         .find(|line| line.contains("Google Chrome") && line.contains("42"))
         .unwrap();
     assert!(
-        row.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count() >= 28,
+        row.chars()
+            .filter(|c| ('\u{2800}'..='\u{28ff}').contains(c))
+            .count()
+            == 28,
         "{row}"
     );
 }
@@ -690,7 +698,8 @@ fn deleted_executable_is_muted_and_explained_even_when_selected() {
             for x in 0..111 {
                 let suffix: String = (x..x + 9).map(|x| buffer[(x, y)].symbol()).collect();
                 if suffix == "(deleted)" {
-                    assert_eq!(buffer[(x, y)].fg, p::text_muted());
+                    // Muted text is lighter on the selected row, for contrast.
+                    assert_eq!(buffer[(x, y)].fg, p::text_secondary());
                     found = true;
                 }
             }

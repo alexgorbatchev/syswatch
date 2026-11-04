@@ -51,7 +51,7 @@ mod tree_tests;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::Frame;
 use std::cell::Cell;
 use unicode_width::UnicodeWidthStr;
@@ -313,7 +313,7 @@ impl Series {
     /// A series on a fixed, semantically meaningful ceiling — a percentage, a
     /// total-memory axis. These must never auto-scale: the empty space above
     /// the trace *is* the reading.
-    fn fixed(vals: Vec<u64>, width: u16, max: u64) -> Self {
+    pub(crate) fn fixed(vals: Vec<u64>, width: u16, max: u64) -> Self {
         Self::build(vals, width, Some(max))
     }
 
@@ -341,7 +341,7 @@ impl Series {
     /// The samples as [`paint::area_graph`] wants them — two entries per
     /// character column. At one sample per column each sample simply fills its
     /// whole cell.
-    fn plot(&self) -> Vec<u64> {
+    pub(crate) fn plot(&self) -> Vec<u64> {
         match SAMPLES_PER_COL {
             2 => self.vals.clone(),
             _ => self.vals.iter().flat_map(|&v| [v, v]).collect(),
@@ -427,7 +427,7 @@ pub fn render(f: &mut Frame, app: &App, snap: &Snapshot) {
             io_box(buf, l.mem, &t, &ramps, app, snap);
         }
     }
-    processes::draw(buf, &l, &t, &ramps, app, snap);
+    processes::draw(buf, &l, &t, app, snap);
 }
 
 // ── box 1: cpu ──────────────────────────────────────────────────────────────
@@ -1465,7 +1465,7 @@ fn short_cmd(cmd: &str) -> String {
 
 /// Clamp to `max` **display columns**, not bytes or chars — a wide glyph in a
 /// process name would otherwise shear every column to its right.
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.width() <= max {
         return s.to_string();
     }
@@ -1490,6 +1490,7 @@ mod tests {
     use crate::collect::{MemTick, ProcTick};
     use crate::config::SyswatchConfig;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
 
     fn snap() -> Snapshot {

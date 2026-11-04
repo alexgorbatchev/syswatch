@@ -2,17 +2,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Table},
+    widgets::Paragraph,
     Frame,
 };
 
 use crate::app::{App, Snapshot};
 use crate::insights::Severity;
-use crate::process_tree::{self, Metric};
+use crate::process_tree::Metric;
+use crate::ui::tree::{Column, TreeTable};
 use crate::ui::{
     graph::{self, GraphStyle},
     palette as p,
-    widgets::{block_bar_styled, human_rate, mem_pct, panel},
+    widgets::{block_bar_styled, human_rate, panel},
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
@@ -253,102 +254,12 @@ fn draw_top_procs(f: &mut Frame, area: Rect, app: &App, snap: &Snapshot) {
     ));
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let header = Row::new(vec![
-        Cell::from("APPLICATION / PROJECT"),
-        Cell::from("PROCS"),
-        Cell::from("PID"),
-        Cell::from("CPU"),
-        Cell::from("%MEM"),
-    ])
-    .style(
-        Style::default()
-            .fg(p::text_muted())
-            .add_modifier(Modifier::BOLD),
+    let rows = app.summary_rows(snap, Metric::Cpu);
+    f.render_widget(
+        TreeTable::new(&rows, "APPLICATION / PROJECT")
+            .columns([Column::cpu().sorted(true), Column::memory()]),
+        inner,
     );
-
-    // Cells without an explicit fg inherit the Table's base style. ratatui
-    // Cell::style overrides that, so for fade to actually affect every
-    // column we have to set an explicit fg on each cell (then fade it).
-    // Otherwise only the CPU column (which carries a kpi_color fg) would
-    // dim and the rest of the row would stay full-bright, making the fade
-    // look broken.
-    let take = inner.height.saturating_sub(1) as usize;
-    let groups = app.summary_rows(snap, Metric::Cpu);
-    let rendered_rows = groups.len().min(take);
-    let pid_width = groups
-        .iter()
-        .take(take)
-        .filter_map(|row| row.process.map(|p| p.pid.to_string().len()))
-        .max()
-        .unwrap_or(0)
-        .max(3) as u16;
-    let rows = groups.iter().take(take).enumerate().map(|(i, row)| {
-        let row_alpha = if app.user_config.graph_fade {
-            crate::ui::graph::row_fade_alpha(i, rendered_rows)
-        } else {
-            1.0
-        };
-        let fade = |s: Style| {
-            if (row_alpha - 1.0).abs() < f32::EPSILON {
-                s
-            } else if let Some(fg) = s.fg {
-                s.fg(crate::ui::graph::fade_color(fg, p::bg(), row_alpha))
-            } else {
-                s
-            }
-        };
-        let plain_fg = fade(Style::default().fg(p::text_primary()));
-        let muted_fg = fade(Style::default().fg(p::text_muted()));
-        let cpu = row.totals.cpu_pct;
-        let mut name = Line::from(vec![
-            Span::styled(format!("{} ", row.icon), plain_fg),
-            Span::styled(row.label.clone(), plain_fg),
-        ]);
-        if process_tree::system_only(&row.members) {
-            name.spans.push(Span::styled(" [system]", muted_fg));
-        }
-        Row::new(vec![
-            Cell::from(name),
-            Cell::from(if row.count == 1 {
-                String::new()
-            } else {
-                row.count.to_string()
-            })
-            .style(muted_fg),
-            Cell::from(row.process.map(|p| p.pid.to_string()).unwrap_or_default()).style(muted_fg),
-            Cell::from(
-                cpu.map(|pct| format!("{pct:.0}%"))
-                    .unwrap_or_else(|| "n/a".into()),
-            )
-            .style(fade(
-                Style::default().fg(cpu
-                    .map(|pct| kpi_color(pct, 30.0, 70.0))
-                    .unwrap_or_else(p::text_muted)),
-            )),
-            Cell::from(format!(
-                "{:.1}",
-                mem_pct(row.totals.mem_rss, snap.mem.total_bytes)
-            ))
-            .style(plain_fg),
-        ])
-    });
-
-    let widths = [
-        Constraint::Min(12),
-        Constraint::Length(5),
-        Constraint::Length(pid_width),
-        Constraint::Length(4),
-        Constraint::Length(5),
-    ];
-    // Cells without an explicit fg inherit this style's fg. Without setting
-    // it, cells render with `Color::Reset` (terminal default fg), which on a
-    // dark-terminal user with the light theme picks the wrong color.
-    let table = Table::new(rows, widths)
-        .header(header)
-        .column_spacing(1)
-        .style(Style::default().fg(p::text_primary()).bg(p::bg()));
-    f.render_widget(table, inner);
 }
 
 fn draw_insights_strip(f: &mut Frame, area: Rect, app: &App) {
@@ -522,7 +433,6 @@ mod tests {
 
         let mut snap = snap;
         snap.procs[2].scope = crate::collect::ProcessScope::System;
-        app.user_config.graph_fade = true;
         app.user_config.cpu_group = crate::process_tree::GroupMode::Project;
         let rows = screen(80, 12, |f| draw_top_procs(f, f.area(), &app, &snap));
         assert!(rows[0].contains("Top consumers (by CPU · Project)"));
