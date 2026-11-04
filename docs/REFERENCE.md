@@ -333,6 +333,11 @@ chart takes 78 seconds. Nothing is fast-forwarded: the axis label measures the
 history it is actually showing, and the sparkline header reports its own span,
 so both say what the faster tick did.
 
+Process rows show each process's share of the whole machine without decimals,
+turning yellow above 10% of the machine, and `--` until the core count is known.
+Their sparklines chart that share with a square-root spread, as Dense does, so
+one busy core on a many-core machine still draws a visible line.
+
 CPU gets a three-row chart and memory two — when a machine feels wrong, CPU is
 the answer more often than RAM. A single vitals line carries temp, fan, power
 and disk throughput, each rendering `--` rather than moving when a sensor isn't

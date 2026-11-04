@@ -631,10 +631,11 @@ pub fn swap_rate(history: &History, tick_ms: u64) -> Option<f64> {
 pub struct LiteProc {
     pub name: String,
     pub user: String,
-    pub cpu_pct: f32,
+    /// Share of the whole machine; `None` while the core count is unknown.
+    pub cpu_pct: Option<f32>,
     pub rss: u64,
     pub threads: Option<u32>,
-    /// CPU history for the row sparkline, 0..1. May be shorter than
+    /// Share-of-machine history for the row sparkline, 0..1. May be shorter than
     /// `SPARK_W` — `bucket_history` handles any sample count.
     pub history: Vec<f32>,
     // ── detail-only fields ──
@@ -648,7 +649,7 @@ pub struct LiteProc {
 }
 
 impl LiteProc {
-    fn from_tick(t: &ProcTick, history: &History) -> Self {
+    fn from_tick(t: &ProcTick, snap: &Snapshot, history: &History) -> Self {
         let hist = history
             .proc_cpu_history
             .get(&t.pid)
@@ -657,7 +658,7 @@ impl LiteProc {
         Self {
             name: t.name.clone(),
             user: t.user.clone(),
-            cpu_pct: t.cpu_pct,
+            cpu_pct: crate::process_tree::machine_pct(snap, t.cpu_pct.max(0.0)),
             rss: t.mem_rss,
             threads: t.threads,
             history: hist,
@@ -678,12 +679,12 @@ pub fn collect_procs(snap: &Snapshot, history: &History) -> Vec<LiteProc> {
     let mut rows: Vec<LiteProc> = snap
         .procs
         .iter()
-        .map(|t| LiteProc::from_tick(t, history))
+        .map(|t| LiteProc::from_tick(t, snap, history))
         .collect();
     rows.sort_by(|a, b| {
         b.cpu_pct
-            .partial_cmp(&a.cpu_pct)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(0.0)
+            .total_cmp(&a.cpu_pct.unwrap_or(0.0))
     });
     rows
 }
@@ -705,6 +706,11 @@ pub fn filter_procs(procs: Vec<LiteProc>, query: &str) -> Vec<LiteProc> {
 /// CPU percent for the headline number: integer, width 3.
 pub fn fmt_cpu_pct(v: f32) -> String {
     format!("{:>3}", v.clamp(0.0, 999.0).round() as u32)
+}
+
+/// A process's share of the whole machine, without decimals.
+pub fn fmt_machine_pct(v: Option<f32>) -> String {
+    v.map_or_else(|| UNAVAILABLE.into(), |pct| format!("{pct:.0}%"))
 }
 
 /// Memory used for the headline number: width 4 in every regime —
@@ -937,7 +943,9 @@ fn draw_sparkline(f: &mut Frame, app: &App, x: u16, y: u16, data: &[f32], color:
     if data.is_empty() {
         return;
     }
-    let bucketed = bucket_history(data);
+    // Square-root spread, as Dense uses: one busy core is a small share of a
+    // many-core machine, and a linear row would draw it as an empty line.
+    let bucketed: Vec<f32> = bucket_history(data).into_iter().map(f32::sqrt).collect();
     graph::render(
         f,
         Rect::new(x, y, SPARK_W, 1),
@@ -1482,9 +1490,9 @@ fn render_table(f: &mut Frame, l: &Layout, app: &App, procs: &[LiteProc], paused
             end,
         );
 
-        // Yellow above 10% — the one transient use of attention color in the
-        // table. Not red: a busy process is not a broken machine.
-        let hot = proc.cpu_pct > 10.0;
+        // Yellow above 10% of the machine — the one transient use of attention
+        // color in the table. Not red: a busy process is not a broken machine.
+        let hot = proc.cpu_pct.is_some_and(|pct| pct > 10.0);
         let cpu_style = Style::default().fg(if paused {
             p::separator()
         } else if hot {
@@ -1496,7 +1504,7 @@ fn render_table(f: &mut Frame, l: &Layout, app: &App, procs: &[LiteProc], paused
             f,
             l.x_cpu,
             y,
-            &format!("{:>w$}", format!("{:.1}%", proc.cpu_pct), w = w_rate),
+            &format!("{:>w$}", fmt_machine_pct(proc.cpu_pct), w = w_rate),
             cpu_style,
             end,
         );
@@ -1582,9 +1590,9 @@ fn render_detail(f: &mut Frame, l: &Layout, proc: &LiteProc, y: u16) {
         x,
         y + 2,
         &format!(
-            "started {}   cpu {:.1}%   {}",
+            "started {}   cpu {} of machine   {}",
             fmt_started(proc.start_time),
-            proc.cpu_pct,
+            fmt_machine_pct(proc.cpu_pct),
             threads
         ),
         dim,
@@ -2106,7 +2114,7 @@ mod tests {
         let mk = |name: &str, user: &str| LiteProc {
             name: name.into(),
             user: user.into(),
-            cpu_pct: 0.0,
+            cpu_pct: Some(0.0),
             rss: 0,
             threads: None,
             history: Vec::new(),
@@ -2244,10 +2252,18 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            cpu: crate::collect::CpuTick {
+                per_core: vec![0.0; 4],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let history = History::new(120);
         let rows = collect_procs(&snap, &history);
         assert_eq!(rows[0].name, "busy");
+        // A share of the whole machine: 42% of one core on four cores.
+        assert_eq!(rows[0].cpu_pct, Some(10.5));
+        assert_eq!(fmt_machine_pct(rows[0].cpu_pct), "10%");
+        assert_eq!(fmt_machine_pct(None), UNAVAILABLE);
     }
 }

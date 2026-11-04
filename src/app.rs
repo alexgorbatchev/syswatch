@@ -57,7 +57,7 @@ pub struct ReplaySource {
     pub total: usize,
 }
 
-/// Number of CPU-usage samples kept per process for the inline Procs sparkline.
+/// Number of CPU-share samples kept per process for Lite's row sparklines.
 pub const PROC_CPU_SPARK_LEN: usize = 64;
 
 pub struct History {
@@ -107,11 +107,9 @@ pub struct History {
     /// are pruned. Values are 0..100. The runaway-proc heuristic reads this
     /// to find processes whose load is sustained, not transient.
     pub proc_cpu_ewma: HashMap<u32, f32>,
-    /// Per-pid short CPU-usage history (0..1, raw cpu_pct/100) for the
-    /// btop-style inline sparkline in the Procs tab (issue #10) and the Dense
-    /// view's much wider `60s` column — at the old depth of 8 that column drew
-    /// four characters into a 28-column field. Bounded to `PROC_CPU_SPARK_LEN`
-    /// samples each; pruned to live pids every tick.
+    /// Per-pid share of the whole machine (0..1) for Lite's row sparklines,
+    /// which bucket it to their width. Bounded to `PROC_CPU_SPARK_LEN` samples
+    /// each; pruned to live pids every tick.
     pub proc_cpu_history: HashMap<u32, Ring<f32>>,
     /// Per-pid billed-power EWMA (macOS) — smooths the 2s sampler so
     /// the energy-hog insight doesn't fire on one busy window.
@@ -265,16 +263,19 @@ impl History {
         }
         self.proc_cpu_ewma = next;
 
-        // Per-pid CPU-usage history for the Procs sparkline (issue #10).
-        // Move existing rings forward, append this tick's raw sample
-        // (cpu_pct/100, clamped), and drop rings for pids that have exited.
+        // Per-pid share of the whole machine for Lite's row sparklines.
+        // Move existing rings forward, append this tick's share (0..1), and
+        // drop rings for pids that have exited. Without a core count there is
+        // no share to record, so that tick adds no sample.
         let mut next_hist: HashMap<u32, Ring<f32>> = HashMap::with_capacity(snap.procs.len());
         for proc_ in &snap.procs {
             let mut ring = self
                 .proc_cpu_history
                 .remove(&proc_.pid)
                 .unwrap_or_else(|| Ring::new(PROC_CPU_SPARK_LEN));
-            ring.push((proc_.cpu_pct / 100.0).clamp(0.0, 1.0));
+            if let Some(pct) = crate::process_tree::machine_pct(snap, proc_.cpu_pct.max(0.0)) {
+                ring.push((pct / 100.0).clamp(0.0, 1.0));
+            }
             next_hist.insert(proc_.pid, ring);
         }
         self.proc_cpu_history = next_hist;
@@ -1730,22 +1731,32 @@ mod tests {
 
     // ── per-pid CPU history sparkline (issue #10) ───────────────────────
 
-    #[test]
-    fn cpu_history_records_normalized_samples() {
-        let mut h = History::new(10);
-        h.push(&snap_with(vec![proc(1, 50.0)]));
-        h.push(&snap_with(vec![proc(1, 100.0)]));
-        let ring = h.proc_cpu_history.get(&1).expect("history for pid 1");
-        // cpu_pct/100, oldest→newest.
-        assert_eq!(ring.to_vec(), vec![0.5, 1.0]);
+    /// Two cores, so a process at 100% of one core is half the machine.
+    fn two_cores(procs: Vec<ProcTick>) -> Snapshot {
+        let mut snap = snap_with(procs);
+        snap.cpu.per_core = vec![0.0; 2];
+        snap
     }
 
     #[test]
-    fn cpu_history_clamps_above_100pct() {
-        // Multi-core aggregate cpu_pct can exceed 100; sparkline samples
-        // are clamped into 0..1 so the glyph mapping stays in range.
+    fn cpu_history_records_each_process_share_of_the_machine() {
         let mut h = History::new(10);
-        h.push(&snap_with(vec![proc(1, 350.0)]));
+        h.push(&two_cores(vec![proc(1, 50.0)]));
+        h.push(&two_cores(vec![proc(1, 100.0)]));
+        let ring = h.proc_cpu_history.get(&1).expect("history for pid 1");
+        // Oldest→newest.
+        assert_eq!(ring.to_vec(), vec![0.25, 0.5]);
+        // Without a core count there is no share to record.
+        h.push(&snap_with(vec![proc(1, 100.0)]));
+        assert_eq!(h.proc_cpu_history.get(&1).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cpu_history_clamps_above_the_whole_machine() {
+        // Sampling skew can report more than every core; samples stay in
+        // 0..1 so the glyph mapping stays in range.
+        let mut h = History::new(10);
+        h.push(&two_cores(vec![proc(1, 350.0)]));
         assert_eq!(h.proc_cpu_history.get(&1).unwrap().to_vec(), vec![1.0]);
     }
 
@@ -1753,7 +1764,7 @@ mod tests {
     fn cpu_history_is_bounded_to_spark_len() {
         let mut h = History::new(10);
         for _ in 0..(PROC_CPU_SPARK_LEN + 5) {
-            h.push(&snap_with(vec![proc(1, 10.0)]));
+            h.push(&two_cores(vec![proc(1, 10.0)]));
         }
         assert_eq!(
             h.proc_cpu_history.get(&1).unwrap().len(),
@@ -2244,6 +2255,47 @@ mod tests {
 
     fn row_of(rows: &[String], needle: &str) -> Option<usize> {
         rows.iter().position(|r| r.contains(needle))
+    }
+
+    /// Lite reports each process as a share of the whole machine, and turns
+    /// it yellow above 10% of the machine rather than 10% of one core.
+    #[test]
+    fn lite_rows_show_whole_machine_cpu() {
+        use crate::config::SyswatchConfig;
+
+        let mut app = App::new(TabId::Overview, SyswatchConfig::default());
+        app.view_mode = ViewMode::Lite;
+        let named = |pid, name: &str, cpu| ProcTick {
+            name: name.into(),
+            ..proc(pid, cpu)
+        };
+        let mut snap = snap_with(vec![named(1, "busyproc", 80.0), named(2, "idleproc", 30.0)]);
+        snap.cpu.per_core = vec![0.0; 4];
+        app.snap = Some(snap);
+        let rows = render_rows(&app, 80, 24);
+        let busy = &rows[row_of(&rows, "busyproc").expect("busy row")];
+        let idle = &rows[row_of(&rows, "idleproc").expect("idle row")];
+        assert!(busy.contains("20%") && !busy.contains("80.0%"), "{busy}");
+        assert!(idle.contains(" 8%"), "{idle}");
+
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let snap = app.displayed_snap().unwrap();
+        term.draw(|f| draw(f, &app, snap)).unwrap();
+        let buf = term.backend().buffer();
+        let color = |row: usize, text: &str| {
+            let x = rows[row].find(text).unwrap();
+            buf[(rows[row][..x].chars().count() as u16, row as u16)].fg
+        };
+        assert_eq!(
+            color(row_of(&rows, "busyproc").unwrap(), "20%"),
+            crate::ui::palette::status_warn()
+        );
+        assert_ne!(
+            color(row_of(&rows, "idleproc").unwrap(), "8%"),
+            crate::ui::palette::status_warn()
+        );
     }
 
     /// Press `key` `n` times, drawing a 120×30 frame after each press like
